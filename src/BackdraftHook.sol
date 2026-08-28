@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {IHooks}          from "v4-core/interfaces/IHooks.sol";
-import {IPoolManager}    from "v4-core/interfaces/IPoolManager.sol";
+import {IHooks}                from "v4-core/interfaces/IHooks.sol";
+import {IPoolManager}          from "v4-core/interfaces/IPoolManager.sol";
+import {IUnlockCallback}       from "v4-core/interfaces/callback/IUnlockCallback.sol";
 import {PoolKey}         from "v4-core/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {BalanceDelta}    from "v4-core/types/BalanceDelta.sol";
@@ -27,7 +28,7 @@ import {EligibilityLib}    from "./libraries/EligibilityLib.sol";
 ///   - Settlement: escrowed value split between traders (α) and LPs (1-α),
 ///     scaled by the fraction of the gap the ledger explains (poisoning defence)
 ///   - LP eligibility: age filter closes JIT attack; top-up resets the clock
-contract BackdraftHook is IHooks {
+contract BackdraftHook is IHooks, IUnlockCallback {
     using PoolIdLibrary  for PoolKey;
     using StateLibrary   for IPoolManager;
     using CurrencyLibrary for Currency;
@@ -200,7 +201,8 @@ contract BackdraftHook is IHooks {
     ) external override returns (bytes4) {
         require(msg.sender == address(poolManager), "not PM");
         PoolId id = key.toId();
-        bytes32 pk = _positionKey(id, sender, params.tickLower, params.tickUpper, params.salt);
+        // Use tx.origin as position owner — sender is the router (periphery), not the LP.
+        bytes32 pk = _positionKey(id, tx.origin, params.tickLower, params.tickUpper, params.salt);
         PositionInfo storage p = positions[pk];
 
         // ANY increase resets the age clock — closes the top-up attack
@@ -227,7 +229,7 @@ contract BackdraftHook is IHooks {
     ) external override returns (bytes4) {
         require(msg.sender == address(poolManager), "not PM");
         PoolId id = key.toId();
-        bytes32 pk = _positionKey(id, sender, params.tickLower, params.tickUpper, params.salt);
+        bytes32 pk = _positionKey(id, tx.origin, params.tickLower, params.tickUpper, params.salt);
         PositionInfo storage p = positions[pk];
         if (params.liquidityDelta < 0) {
             uint128 removed = uint128(uint256(-int256(params.liquidityDelta)));
@@ -473,11 +475,29 @@ contract BackdraftHook is IHooks {
         return openGapIdx[id] == idx;
     }
 
+    // Encoded payload for unlockCallback — used by claimTrader/claimLp
+    struct PayoutData {
+        Currency currency;
+        address  to;
+        uint256  amount;
+    }
+
+    /// @notice IUnlockCallback — called back by PoolManager during claim payouts.
+    ///         burn() and take() require the PM to be in an unlocked context.
+    ///         Claim functions are called outside swaps, so we must self-unlock.
+    function unlockCallback(bytes calldata data) external returns (bytes memory) {
+        require(msg.sender == address(poolManager), "not PM");
+        PayoutData memory p = abi.decode(data, (PayoutData));
+        poolManager.burn(address(this), p.currency.toId(), p.amount);
+        poolManager.take(p.currency, p.to, p.amount);
+        return "";
+    }
+
     function _payout(PoolId id, Gap storage g, address to, uint256 amount) internal {
         if (amount == 0) return;
         Currency cur = g.isCurrency0 ? _currency0[id] : _currency1[id];
-        poolManager.burn(address(this), cur.toId(), amount);
-        poolManager.take(cur, to, amount);
+        // burn+take require an unlock context; claim functions are called outside swaps.
+        poolManager.unlock(abi.encode(PayoutData({currency: cur, to: to, amount: amount})));
     }
 
     function _contributionKey(PoolId id, uint256 gapIdx, address addr) internal pure returns (bytes32) {

@@ -150,7 +150,7 @@ abstract contract BackdraftTestBase is Test {
 
     /// @dev Add liquidity centred around tick 0
     function _addLiquidity(address lp, int24 tickLower, int24 tickUpper, uint128 liquidity) internal {
-        vm.startPrank(lp);
+        vm.startPrank(lp, lp);
         token0.approve(address(lpRouter), type(uint256).max);
         token1.approve(address(lpRouter), type(uint256).max);
 
@@ -169,7 +169,7 @@ abstract contract BackdraftTestBase is Test {
 
     /// @dev Execute a swap. amountSpecified < 0 = exact-input.
     function _swap(address swapper, bool zeroForOne, int256 amountSpecified) internal returns (int256, int256) {
-        vm.startPrank(swapper);
+        vm.startPrank(swapper, swapper);
         token0.approve(address(swapRouter), type(uint256).max);
         token1.approve(address(swapRouter), type(uint256).max);
 
