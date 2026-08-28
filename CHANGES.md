@@ -82,6 +82,13 @@ Changes are appended chronologically. Never deleted.
 15. `vm.expectRevert(bytes("n/a"))` — 3-byte raw data triggers forge internal panic in error decoder; fixed to `abi.encodeWithSignature("Error(string)", "n/a")` for all require-string reverts
 16. Exogenous gap test: VIK's large overshoot past ref credits VIK as contributor, so `totalContribution > 0` — removed the unreachable `claimTrader` revert assertion; conservation check (`lpGot <= escrowed`) is the real invariant anyway
 
+### Parameter sweep + gas table (Day 6)
+- `test/sweep/ParamSweep.t.sol` — fully complete, all 27 rows print cleanly
+- `GasTableTest` — 7 individual gas measurements, all passing
+- Root cause of sweep crash: `vm.roll()` inside each scenario accumulated globally — fixed with `vm.snapshotState()` / `vm.revertToState()` per iteration so block number and EVM state reset between runs
+- Root cause of OutOfGas after 11 rows: test gas budget exhausted by 27× full-stack deployments (PoolManager + 3 routers + hook mining); fixed with `gas_limit = "9999999999999999"` in foundry.toml
+- Bug fixed: `settle()` did not clear `openGapIdx` when settling an expired-but-still-"open" gap — `openGapIdx[id] == gapIdx` check added; `invariant_openGapIdxValid` now passes reliably
+
 ### Solvency invariant (Day 5)
 - `test/invariant/Solvency.t.sol` — handler + 4 invariants, 256 runs / 3840 calls, all pass
   - `invariant_hookSolvent`: hook ERC-6909 balance >= ghost-tracked unsettled escrow for each currency

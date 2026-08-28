@@ -380,6 +380,9 @@ contract BackdraftHook is IHooks, IUnlockCallback {
             "still open"
         );
         g.settled = true;
+        // If this gap expired while still marked open, clear the pointer so
+        // openGapIdx never points to a settled gap.
+        if (openGapIdx[id] == gapIdx) openGapIdx[id] = 0;
 
         uint256 tp = _traderPot(id, g);
         uint256 lp = g.escrowed - tp;
