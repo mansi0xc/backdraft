@@ -81,3 +81,12 @@ Changes are appended chronologically. Never deleted.
 14. `poolManager.burn()+take()` called outside unlock context in claim functions — added `IUnlockCallback`, claim functions now call `poolManager.unlock()` which calls back into `unlockCallback` to do the actual burn+take
 15. `vm.expectRevert(bytes("n/a"))` — 3-byte raw data triggers forge internal panic in error decoder; fixed to `abi.encodeWithSignature("Error(string)", "n/a")` for all require-string reverts
 16. Exogenous gap test: VIK's large overshoot past ref credits VIK as contributor, so `totalContribution > 0` — removed the unreachable `claimTrader` revert assertion; conservation check (`lpGot <= escrowed`) is the real invariant anyway
+
+### Solvency invariant (Day 5)
+- `test/invariant/Solvency.t.sol` — handler + 4 invariants, 256 runs / 3840 calls, all pass
+  - `invariant_hookSolvent`: hook ERC-6909 balance >= ghost-tracked unsettled escrow for each currency
+  - `invariant_noGapExceedsBalance`: no single gap's escrowed amount exceeds hook's total balance
+  - `invariant_openGapIdxValid`: openGapIdx is either 0 or a valid, unsettled array index
+  - `invariant_traderPotBounded`: traderShareBps <= 10_000 (structural cap on trader pot fraction)
+- Handler actions: addLiq, doSwap, doSettle, doClaimTrader, doClaimLp, advanceBlocks, moveOracle
+- Ghost variables sync after every action: `ghost_escrowed0` / `ghost_escrowed1` sum unsettled escrow per currency
