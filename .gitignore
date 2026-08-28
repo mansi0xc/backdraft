@@ -1,0 +1,14 @@
+# Foundry
+/out/
+/cache/
+/broadcast/
+
+# Env
+.env
+
+# Python (refbench)
+__pycache__/
+*.pyc
+refbench/data/
+idea.md
+plan.md
