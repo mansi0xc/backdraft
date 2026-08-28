@@ -25,11 +25,12 @@ import {PoolId}            from "v4-core/types/PoolId.sol";
 contract ParamSweepTest is Test {
 
     // Scenario constants (held fixed across all sweep points)
-    uint256 constant LIQUIDITY     = 10_000_000e18;
-    uint256 constant GAP_NOTIONAL  = 500_000e18;  // Rohan's opening swap
-    uint256 constant CLOSE_NOTIONAL = 100_000e18; // Vik's closing swap
-    int24   constant TICK_LOWER    = -6000;
-    int24   constant TICK_UPPER    = 6000;
+    uint256 constant LIQUIDITY      = 10_000_000e18;
+    uint256 constant GAP_NOTIONAL   = 500_000e18;   // Rohan's opening swap
+    uint256 constant WIDEN_NOTIONAL = 200_000e18;   // Rohan's 2nd swing — credited contribution
+    uint256 constant CLOSE_NOTIONAL = 2_000_000e18; // Vik's closing swap (large to hit caps)
+    int24   constant TICK_LOWER     = -6000;
+    int24   constant TICK_UPPER     = 6000;
 
     // Sweep grid
     uint16[3] captureRates  = [uint16(100), 300, 500];   // bps
@@ -89,25 +90,26 @@ contract ParamSweepTest is Test {
         address ROHAN = address(0xaaaa);
         address VIK   = address(0xbbbb);
 
-        h.fund(LP,    50_000_000e18);
-        h.fund(ROHAN, 50_000_000e18);
-        h.fund(VIK,   50_000_000e18);
+        h.fund(LP,    100_000_000e18);
+        h.fund(ROHAN, 100_000_000e18);
+        h.fund(VIK,   100_000_000e18);
 
-        // LP adds early
+        // LP adds early so it's eligible when the gap opens
         h.addLiq(LP, TICK_LOWER, TICK_UPPER, uint128(LIQUIDITY));
         vm.roll(block.number + h.minAgeBlocks() + 1);
 
-        // Rohan opens gap
+        // Rohan's first swing: opens the gap (afterSwap early-returns → no contribution yet)
         h.swap(ROHAN, false, -int256(GAP_NOTIONAL));
         uint256 gapIdx = h.hook().openGapIdx(h.poolId());
         if (gapIdx == 0) return r; // gap didn't open — skip
 
-        // Vik closes gap (narrowing — surcharged)
-        uint256 gasBefore = gasleft();
-        // We measure beforeSwap+afterSwap gas via the swap gas delta
+        // Rohan's second swing: widen further INTO the already-open gap → credited
+        h.swap(ROHAN, false, -int256(WIDEN_NOTIONAL));
+
+        // Vik: large narrowing swap — surcharged, closes the gap
         uint256 gasPreSwap = gasleft();
         h.swap(VIK, true, -int256(CLOSE_NOTIONAL));
-        r.gasBeforeSwap = gasPreSwap - gasleft(); // approximation: whole swap path
+        r.gasBeforeSwap = gasPreSwap - gasleft();
 
         r.escrowed = h.hook().gapAt(h.poolId(), gapIdx).escrowed;
         if (r.escrowed == 0) return r;
@@ -126,7 +128,7 @@ contract ParamSweepTest is Test {
 
         BackdraftHook.Gap memory g = h.hook().gapAt(h.poolId(), gapIdx);
 
-        // Compute pots (mirrors _traderPot logic)
+        // Compute pots (mirrors _traderPot logic in the hook)
         if (g.totalContribution > 0 && g.maxAbsGap > 0) {
             uint256 explained = uint256(g.totalContribution) > uint256(g.maxAbsGap)
                 ? uint256(g.maxAbsGap) : uint256(g.totalContribution);
@@ -135,11 +137,11 @@ contract ParamSweepTest is Test {
         }
         r.lpPot = uint256(g.escrowed) - r.traderPot;
 
-        // Claim trader if VIK contributed on the closing swing
-        bytes32 vikKey = keccak256(abi.encode(h.poolId(), gapIdx, VIK));
-        if (h.hook().contribution(vikKey) > 0) {
+        // Claim trader (Rohan contributed on the second widening swing)
+        bytes32 rohanKey = keccak256(abi.encode(h.poolId(), gapIdx, ROHAN));
+        if (h.hook().contribution(rohanKey) > 0) {
             uint256 gasPreClaim = gasleft();
-            vm.prank(VIK, VIK);
+            vm.prank(ROHAN, ROHAN);
             try h.hook().claimTrader(h.poolId(), gapIdx) {
                 r.gasClaimTrader = gasPreClaim - gasleft();
             } catch {}
@@ -154,8 +156,6 @@ contract ParamSweepTest is Test {
         try h.hook().claimLp(h.poolId(), gapIdx, lpPosKey) {
             r.gasClaimLp = gasPreLpClaim - gasleft();
         } catch {}
-
-        gasBefore; // suppress unused warning
     }
 
     function _logResult(SweepResult memory r) internal pure {

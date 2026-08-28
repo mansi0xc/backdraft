@@ -88,6 +88,7 @@ Changes are appended chronologically. Never deleted.
 - Root cause of sweep crash: `vm.roll()` inside each scenario accumulated globally — fixed with `vm.snapshotState()` / `vm.revertToState()` per iteration so block number and EVM state reset between runs
 - Root cause of OutOfGas after 11 rows: test gas budget exhausted by 27× full-stack deployments (PoolManager + 3 routers + hook mining); fixed with `gas_limit = "9999999999999999"` in foundry.toml
 - Bug fixed: `settle()` did not clear `openGapIdx` when settling an expired-but-still-"open" gap — `openGapIdx[id] == gapIdx` check added; `invariant_openGapIdxValid` now passes reliably
+- Sweep scenario improved: added ROHAN second widening swing into the open gap so totalContribution > 0; increased CLOSE_NOTIONAL to 2M so surcharge cap binds at rate=500, cap=50; data now shows traderPot varying 18/30/42% with traderShareBps, cap binding visible at rate=500
 
 ### Solvency invariant (Day 5)
 - `test/invariant/Solvency.t.sol` — handler + 4 invariants, 256 runs / 3840 calls, all pass
