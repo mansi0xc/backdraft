@@ -98,6 +98,8 @@ contract BackdraftHook is IHooks {
     mapping(PoolId => uint256[]) private _addedCheckpointBlocks;
     mapping(PoolId => uint128[]) private _addedCheckpointValues;
     mapping(PoolId => uint128)   private _totalAdded;
+    mapping(PoolId => Currency)  private _currency0;
+    mapping(PoolId => Currency)  private _currency1;
 
     // =========================================================================
     // Events
@@ -114,9 +116,10 @@ contract BackdraftHook is IHooks {
     // Constructor
     // =========================================================================
 
-    constructor(IPoolManager _poolManager, IReferencePrice _referenceOracle) {
+    constructor(IPoolManager _poolManager, IReferencePrice _referenceOracle, address _owner) {
         poolManager = _poolManager;
         referenceOracle = _referenceOracle;
+        owner = _owner;
     }
 
     // =========================================================================
@@ -171,9 +174,17 @@ contract BackdraftHook is IHooks {
         returns (bytes4)
     {
         require(msg.sender == address(poolManager), "not PM");
-        // Validate that a config exists for this pool
         PoolId id = key.toId();
-        require(cfg[id].fastPool != address(0), "no config");
+        // Store currencies for payout — needed by _payout since we only have PoolId there
+        _currency0[id] = key.currency0;
+        _currency1[id] = key.currency1;
+        // Push sentinel at index 0 so openGapIdx==0 unambiguously means "no open gap".
+        // Real gaps start at index 1.
+        _gaps[id].push(Gap({
+            openBlock: 0, expiryBlock: 0, refTickAtOpen: 0, tickAtOpen: 0,
+            eligibleLiqAtOpen: 0, escrowed: 0, totalContribution: 0,
+            maxAbsGap: 0, gapPositive: false, isCurrency0: false, settled: true
+        }));
         return IHooks.afterInitialize.selector;
     }
 
@@ -242,7 +253,7 @@ contract BackdraftHook is IHooks {
         (int24 refTick, bool ok) = referenceOracle.getRefTick(id);
         if (!ok) return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
 
-        (, int24 tick,,) = poolManager.getSlot0(id);
+        (, int24 tick,,) = StateLibrary.getSlot0(poolManager, id);
         int24 gapBefore = tick - refTick;
         _cachedAbsGapBefore[id] = GapMath.abs(gapBefore);
 
@@ -298,7 +309,7 @@ contract BackdraftHook is IHooks {
         (int24 refTick, bool ok) = referenceOracle.getRefTick(id);
         if (!ok) return (IHooks.afterSwap.selector, 0);
 
-        (, int24 tick,,) = poolManager.getSlot0(id);
+        (, int24 tick,,) = StateLibrary.getSlot0(poolManager, id);
         int24 gapNow  = tick - refTick;
         uint24 absNow = GapMath.abs(gapNow);
 
@@ -426,9 +437,10 @@ contract BackdraftHook is IHooks {
         uint48 openBlock = uint48(block.number);
 
         // Eligible liquidity denominator: in-range liquidity minus recently-added
-        uint128 inRange    = poolManager.getLiquidity(id);
+        uint128 inRange    = StateLibrary.getLiquidity(poolManager, id);
         uint128 addedNow   = _totalAdded[id];
-        uint128 addedThen  = _cumulativeAddedAt(id, openBlock - c.minAgeBlocks);
+        uint48  lookback   = openBlock > c.minAgeBlocks ? openBlock - c.minAgeBlocks : 0;
+        uint128 addedThen  = _cumulativeAddedAt(id, lookback);
         uint128 eligibleLiq = inRange > (addedNow - addedThen)
             ? inRange - (addedNow - addedThen)
             : 0;
@@ -463,21 +475,9 @@ contract BackdraftHook is IHooks {
 
     function _payout(PoolId id, Gap storage g, address to, uint256 amount) internal {
         if (amount == 0) return;
-        Currency cur = g.isCurrency0 ? cfg[id].fastPool == address(0)
-            ? Currency.wrap(address(0))
-            : _poolCurrency0(id)
-            : _poolCurrency1(id);
+        Currency cur = g.isCurrency0 ? _currency0[id] : _currency1[id];
         poolManager.burn(address(this), cur.toId(), amount);
         poolManager.take(cur, to, amount);
-    }
-
-    function _poolCurrency0(PoolId) internal pure returns (Currency) {
-        // Placeholder — real impl gets this from stored PoolKey
-        return Currency.wrap(address(0));
-    }
-
-    function _poolCurrency1(PoolId) internal pure returns (Currency) {
-        return Currency.wrap(address(0));
     }
 
     function _contributionKey(PoolId id, uint256 gapIdx, address addr) internal pure returns (bytes32) {
