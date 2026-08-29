@@ -11,6 +11,8 @@ import {BeforeSwapDelta, BeforeSwapDeltaLibrary, toBeforeSwapDelta} from "v4-cor
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
 import {Hooks}           from "v4-core/libraries/Hooks.sol";
 import {StateLibrary}    from "v4-core/libraries/StateLibrary.sol";
+import {FullMath}        from "v4-core/libraries/FullMath.sol";
+import {FixedPoint96}    from "v4-core/libraries/FixedPoint96.sol";
 import {SafeCast}        from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 import {IReferencePrice}   from "./interfaces/IReferencePrice.sol";
@@ -127,6 +129,11 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     // =========================================================================
     // Events
     // =========================================================================
+
+    /// @notice A gap's escrow must stay in a single currency. Unreachable while the
+    ///         sign-flip rule holds (narrowing direction is fixed for a gap's life);
+    ///         a named error rather than assert() so a trace says which invariant broke.
+    error EscrowCurrencyMismatch(PoolId id, uint256 gapIdx);
 
     event GapOpened(PoolId indexed id, uint256 gapIdx, int24 refTick, uint48 openBlock);
     event Contributed(PoolId indexed id, uint256 gapIdx, address indexed trader, uint128 ticks);
@@ -285,7 +292,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
             return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
         }
 
-        (, int24 tick,,) = StateLibrary.getSlot0(poolManager, id);
+        (uint160 sqrtPriceX96, int24 tick,,) = StateLibrary.getSlot0(poolManager, id);
         int24 gapBefore = tick - refTick;
 
         // Direction is decided here, on the PRE-swap gap, and cached for afterSwap.
@@ -324,11 +331,27 @@ contract BackdraftHook is IHooks, IUnlockCallback {
             }
         }
 
-        // Only exact-input swaps are surcharged (amountSpecified < 0)
-        if (params.amountSpecified >= 0) return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+        if (!narrowing) return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
 
-        bool narrowingSwap = narrowing;
-        if (!narrowingSwap) return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+        // Exact-output swaps are surcharged too. They previously returned early on
+        // `amountSpecified >= 0`, which in v4 is EXACT OUTPUT — so an arbitrageur flipped
+        // one flag in their swap params and paid nothing. Measured: 1920e18 via exact
+        // input, 0 via exact output on the same gap. Every router supports exact output,
+        // so this was the mechanism's cheapest and most complete bypass.
+        bool exactInput = params.amountSpecified < 0;
+
+        // Notional must be expressed in the currency the surcharge is taken in, which is
+        // always the INPUT currency (see the return statement below). For an exact-output
+        // swap `amountSpecified` counts OUTPUT tokens, so it is converted at the pre-swap
+        // pool price. Skipping this conversion would misprice by the whole exchange rate
+        // — on ETH/USDC by a factor of ~3000.
+        //
+        // The conversion ignores the price impact of the swap itself, so an exact-output
+        // surcharge is a slight approximation of its exact-input equivalent. Bounded by
+        // the same surchargeCapBps and measured at under 10% in ExactOutput.t.sol.
+        uint256 notional = exactInput
+            ? uint256(-params.amountSpecified)
+            : _outputToInput(sqrtPriceX96, uint256(params.amountSpecified), params.zeroForOne);
 
         // Price on maxAbsGap — the widest the gap has been during its life — not on
         // the gap prevailing at this instant.
@@ -349,27 +372,38 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         // documented in idea.md §6, slightly enlarged and still bounded by surchargeCapBps.
         Gap storage gp = _gaps[id][idx];
         uint128 surcharge = SurchargeMath.compute(
-            uint256(-params.amountSpecified),
+            notional,
             gp.maxAbsGap,
             c.captureRateBps,
             c.surchargeCapBps
         );
         if (surcharge == 0) return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
 
+        // Escrow is ALWAYS taken in the input currency, for both swap types. This is
+        // what preserves the one-currency-per-gap invariant: for exact input the input
+        // currency is the SPECIFIED one, for exact output it is the UNSPECIFIED one, and
+        // v4-core maps them accordingly (Hooks.afterSwap picks the BalanceDelta ordering
+        // from `amountSpecified < 0 == zeroForOne`). Taking exact output on the specified
+        // side instead would land escrow in the output currency and make a gap closed by
+        // a mix of swap types revert on the currency invariant.
         Currency spec = params.zeroForOne ? key.currency0 : key.currency1;
         poolManager.mint(address(this), spec.toId(), surcharge);
 
         if (gp.escrowed == 0) {
             gp.isCurrency0 = params.zeroForOne;
-        } else {
-            assert(gp.isCurrency0 == params.zeroForOne);
+        } else if (gp.isCurrency0 != params.zeroForOne) {
+            revert EscrowCurrencyMismatch(id, idx);
         }
         gp.escrowed += surcharge;
 
         emit Surcharged(id, idx, tx.origin, surcharge);
 
-        // Positive deltaSpecified => hook is owed => taken from the swapper
-        return (IHooks.beforeSwap.selector, toBeforeSwapDelta(int128(surcharge), 0), 0);
+        // Positive delta => hook is owed => taken from the swapper.
+        // Exact input:  the input currency is SPECIFIED   -> (surcharge, 0)
+        // Exact output: the input currency is UNSPECIFIED -> (0, surcharge)
+        return exactInput
+            ? (IHooks.beforeSwap.selector, toBeforeSwapDelta(int128(surcharge), 0), 0)
+            : (IHooks.beforeSwap.selector, toBeforeSwapDelta(0, int128(surcharge)), 0);
     }
 
     // =========================================================================
@@ -635,6 +669,27 @@ contract BackdraftHook is IHooks, IUnlockCallback {
 
     function _contributionKey(PoolId id, uint256 gapIdx, address addr) internal pure returns (bytes32) {
         return keccak256(abi.encode(id, gapIdx, addr));
+    }
+
+    /// @notice Convert an exact-output amount into the equivalent input-token amount at
+    ///         the current pool price, so the surcharge is bps of the right quantity.
+    /// @dev    priceX96 = (sqrtP/2^96)^2 * 2^96 = token1 per token0, Q96. Computed with
+    ///         FullMath because sqrtP^2 overflows uint256 for large prices; the 512-bit
+    ///         intermediate keeps sqrtP^2 / 2^96 <= 2^224, which fits.
+    ///           zeroForOne: input token0, output token1 -> in = out / price
+    ///           oneForZero: input token1, output token0 -> in = out * price
+    function _outputToInput(uint160 sqrtPriceX96, uint256 amountOut, bool zeroForOne)
+        internal
+        pure
+        returns (uint256)
+    {
+        uint256 priceX96 = FullMath.mulDiv(
+            uint256(sqrtPriceX96), uint256(sqrtPriceX96), FixedPoint96.Q96
+        );
+        if (priceX96 == 0) return 0;
+        return zeroForOne
+            ? FullMath.mulDiv(amountOut, FixedPoint96.Q96, priceX96)
+            : FullMath.mulDiv(amountOut, priceX96, FixedPoint96.Q96);
     }
 
     function _positionKey(PoolId id, address owner_, int24 tickLower, int24 tickUpper, bytes32 salt)
