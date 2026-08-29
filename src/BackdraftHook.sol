@@ -117,6 +117,21 @@ contract BackdraftHook is IHooks, IUnlockCallback {
 
     mapping(PoolId => SwapCache) private _swapCache;
 
+    /// @notice Routers whose hookData is trusted to name the end user.
+    /// @dev    In v4 the `sender` argument to a hook callback is the ROUTER, never the
+    ///         end user, so a hook that needs user identity must be told it. Uniswap's
+    ///         own v4-security-foundations skill lists `tx.origin` as Absolute
+    ///         Prohibition #9 for this purpose, and the concrete failure is ERC-4337:
+    ///         for a UserOperation `tx.origin` is the BUNDLER, so a smart-account LP's
+    ///         position would be recorded against the bundler and the bundler could
+    ///         claim it. Same for swap contributions.
+    ///
+    ///         hookData is only trusted from an allowlisted router. An arbitrary router
+    ///         could otherwise name any address as the user and credit itself for
+    ///         someone else's swap — which is the phishing vector the prohibition warns
+    ///         about, merely relocated.
+    mapping(address => bool) public allowedRouters;
+
     // Simple cumulative liquidity-added checkpoint for eligibility denominator
     // Keyed by poolId; stores (blockNumber => cumulative added)
     // Full OZ Checkpoints would be ideal — this is a simplified version
@@ -134,6 +149,9 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     ///         sign-flip rule holds (narrowing direction is fixed for a gap's life);
     ///         a named error rather than assert() so a trace says which invariant broke.
     error EscrowCurrencyMismatch(PoolId id, uint256 gapIdx);
+
+    event RouterAllowed(address indexed router, bool allowed);
+    event UnattributedAction(PoolId indexed id, address indexed router);
 
     event GapOpened(PoolId indexed id, uint256 gapIdx, int24 refTick, uint48 openBlock);
     event Contributed(PoolId indexed id, uint256 gapIdx, address indexed trader, uint128 ticks);
@@ -191,6 +209,15 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         cfg[id] = c;
     }
 
+    /// @notice Allow or disallow a router's hookData as a source of user identity.
+    /// @dev    Allowlisting a router is a trust decision: that router can name any
+    ///         address as the user for swaps and liquidity it submits. Allowlist only
+    ///         routers whose identity-forwarding you have read.
+    function setRouterAllowed(address router, bool allowed) external onlyOwner {
+        allowedRouters[router] = allowed;
+        emit RouterAllowed(router, allowed);
+    }
+
     function setReferenceOracle(IReferencePrice oracle) external onlyOwner {
         referenceOracle = oracle;
     }
@@ -227,12 +254,13 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         address sender,
         PoolKey calldata key,
         IPoolManager.ModifyLiquidityParams calldata params,
-        bytes calldata
+        bytes calldata hookData
     ) external override returns (bytes4) {
         require(msg.sender == address(poolManager), "not PM");
         PoolId id = key.toId();
-        // Use tx.origin as position owner — sender is the router (periphery), not the LP.
-        bytes32 pk = _positionKey(id, tx.origin, params.tickLower, params.tickUpper, params.salt);
+        address lp = _resolveUser(sender, hookData);
+        if (lp == sender && !allowedRouters[sender]) emit UnattributedAction(id, sender);
+        bytes32 pk = _positionKey(id, lp, params.tickLower, params.tickUpper, params.salt);
         PositionInfo storage p = positions[pk];
 
         // ANY increase resets the age clock — closes the top-up attack
@@ -255,11 +283,13 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         address sender,
         PoolKey calldata key,
         IPoolManager.ModifyLiquidityParams calldata params,
-        bytes calldata
+        bytes calldata hookData
     ) external override returns (bytes4) {
         require(msg.sender == address(poolManager), "not PM");
         PoolId id = key.toId();
-        bytes32 pk = _positionKey(id, tx.origin, params.tickLower, params.tickUpper, params.salt);
+        bytes32 pk = _positionKey(
+            id, _resolveUser(sender, hookData), params.tickLower, params.tickUpper, params.salt
+        );
         PositionInfo storage p = positions[pk];
         if (params.liquidityDelta < 0) {
             uint128 removed = uint128(uint256(-int256(params.liquidityDelta)));
@@ -273,10 +303,10 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     // =========================================================================
 
     function beforeSwap(
-        address,
+        address sender,
         PoolKey calldata key,
         IPoolManager.SwapParams calldata params,
-        bytes calldata
+        bytes calldata hookData
     ) external override returns (bytes4, BeforeSwapDelta, uint24) {
         require(msg.sender == address(poolManager), "not PM");
         PoolId id = key.toId();
@@ -396,7 +426,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         }
         gp.escrowed += surcharge;
 
-        emit Surcharged(id, idx, tx.origin, surcharge);
+        emit Surcharged(id, idx, _resolveUser(sender, hookData), surcharge);
 
         // Positive delta => hook is owed => taken from the swapper.
         // Exact input:  the input currency is SPECIFIED   -> (surcharge, 0)
@@ -411,11 +441,11 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     // =========================================================================
 
     function afterSwap(
-        address,
+        address sender,
         PoolKey calldata key,
         IPoolManager.SwapParams calldata,
         BalanceDelta,
-        bytes calldata
+        bytes calldata hookData
     ) external override returns (bytes4, int128) {
         require(msg.sender == address(poolManager), "not PM");
         PoolId id = key.toId();
@@ -442,6 +472,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         // largest "contributor" — the exact rebate-to-the-arbitrageur failure that
         // killed the own-pool-EMA design (appendix §5).
         bool creditable = sc.valid && !sc.wasNarrowing;
+        address trader = _resolveUser(sender, hookData);
 
         if (idx == 0) {
             // Reaching here means the gap was BELOW threshold at entry (beforeSwap
@@ -449,14 +480,14 @@ contract BackdraftHook is IHooks, IUnlockCallback {
             // created the dislocation. It is the originator and must be credited.
             if (absNow > c.gapThresholdTicks) {
                 _openGap(id, refTick, tick, gapNow);
-                _credit(id, openGapIdx[id], sc.absGapBefore, absNow, creditable);
+                _credit(id, openGapIdx[id], trader, sc.absGapBefore, absNow, creditable);
             }
             return (IHooks.afterSwap.selector, 0);
         }
 
         Gap storage g = _gaps[id][idx];
 
-        _credit(id, idx, sc.absGapBefore, absNow, creditable);
+        _credit(id, idx, trader, sc.absGapBefore, absNow, creditable);
 
         // maxAbsGap is the denominator of the poisoning defence (§3.3) and must
         // track only how wide WIDENERS pushed the gap. A narrowing swap can only
@@ -547,11 +578,11 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     ///         argument. Taking it as a parameter let any address pass another LP's
     ///         key and be paid, because every input to _positionKey (poolId, owner,
     ///         ticks, salt) is public or enumerable from events.
-    ///         Known limitation: positions are recorded against tx.origin in
-    ///         beforeAddLiquidity (the router is `sender`), so an LP must claim from
-    ///         the same EOA that added the liquidity. Smart-contract wallets and
-    ///         ERC-4337 accounts cannot claim. Documented in the README alongside the
-    ///         existing tx.origin attribution limitation.
+    ///         Positions are recorded against the address an allowlisted router names
+    ///         in hookData, or against the router itself when it is not allowlisted. An
+    ///         LP therefore claims from the address their router declared — which for a
+    ///         smart-contract wallet or ERC-4337 account is the account, as it should
+    ///         be, rather than the bundler.
     function claimLp(PoolId id, uint256 gapIdx, int24 tickLower, int24 tickUpper, bytes32 salt)
         external
     {
@@ -591,14 +622,14 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     ///         exogenous/endogenous gaps therefore split correctly with no extra
     ///         branch — the same property that makes an empty ledger mean "wholly
     ///         exogenous".
-    function _credit(PoolId id, uint256 idx, uint24 absBefore, uint24 absNow, bool creditable)
-        internal
-    {
+    function _credit(
+        PoolId id, uint256 idx, address trader, uint24 absBefore, uint24 absNow, bool creditable
+    ) internal {
         if (!creditable || absNow <= absBefore) return;
         uint128 d = uint128(absNow - absBefore);
-        contribution[_contributionKey(id, idx, tx.origin)] += d;
+        contribution[_contributionKey(id, idx, trader)] += d;
         _gaps[id][idx].totalContribution += d;
-        emit Contributed(id, idx, tx.origin, d);
+        emit Contributed(id, idx, trader, d);
     }
 
     function _openGap(PoolId id, int24 refTick, int24 tickNow, int24 gapNow) internal {
@@ -690,6 +721,23 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         return zeroForOne
             ? FullMath.mulDiv(amountOut, FixedPoint96.Q96, priceX96)
             : FullMath.mulDiv(amountOut, priceX96, FixedPoint96.Q96);
+    }
+
+    /// @notice Resolve the end user behind a hook callback.
+    /// @param  sender   the router, as v4 passes it
+    /// @param  hookData abi.encode(address user) when the router forwards identity
+    /// @dev    Falls back to `sender` rather than reverting. A hook must not brick swaps
+    ///         for anyone using an unrecognised router — the same freeze-not-revert
+    ///         principle the reference guard follows. The consequence of falling back is
+    ///         that attribution accrues to the router rather than to its users, which is
+    ///         a loss of a rebate, never a theft: the surcharge is charged identically
+    ///         either way, so routing through an unknown router is not a bypass.
+    function _resolveUser(address sender, bytes calldata hookData) internal view returns (address) {
+        if (allowedRouters[sender] && hookData.length == 32) {
+            address u = abi.decode(hookData, (address));
+            if (u != address(0)) return u;
+        }
+        return sender;
     }
 
     function _positionKey(PoolId id, address owner_, int24 tickLower, int24 tickUpper, bytes32 salt)

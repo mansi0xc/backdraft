@@ -97,6 +97,12 @@ abstract contract BackdraftTestBase is Test {
         );
         require(address(hook) == hookAddr, "hook addr mismatch");
 
+        // Trust the v4-core test routers to name the end user in hookData. In
+        // production this is the deliberate trust decision described on
+        // BackdraftHook.setRouterAllowed: an allowlisted router can name any address.
+        hook.setRouterAllowed(address(swapRouter), true);
+        hook.setRouterAllowed(address(lpRouter),   true);
+
         // 4. Deploy tokens (sorted so currency0 < currency1)
         TestERC20 tA = new TestERC20(type(uint128).max);
         TestERC20 tB = new TestERC20(type(uint128).max);
@@ -162,7 +168,7 @@ abstract contract BackdraftTestBase is Test {
                 liquidityDelta: int256(uint256(liquidity)),
                 salt:           bytes32(0)
             }),
-            ""
+            abi.encode(lp)          // hookData: allowlisted router names the LP
         );
         vm.stopPrank();
     }
@@ -186,7 +192,7 @@ abstract contract BackdraftTestBase is Test {
                 : TickMath.MAX_SQRT_PRICE - 1
         });
 
-        swapRouter.swap(poolKey, params, settings, "");
+        swapRouter.swap(poolKey, params, settings, abi.encode(swapper));
         vm.stopPrank();
 
         return (0, 0); // delta not needed by most callers
