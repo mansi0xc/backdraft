@@ -318,9 +318,27 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         bool narrowingSwap = narrowing;
         if (!narrowingSwap) return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
 
+        // Price on maxAbsGap — the widest the gap has been during its life — not on
+        // the gap prevailing at this instant.
+        //
+        // Pricing on the prevailing gap is split-gameable. Each leg of a split close
+        // sees a smaller gap than the last, so the rate decays across the sequence and
+        // the total collected approaches the integral of a linear function from 0 to G
+        // instead of its value at G. Measured on the unpatched branch: one swap paid
+        // 3840, the same notional in eight legs paid 1380 — a 64% discount for a
+        // two-line change to a searcher's bundle.
+        //
+        // maxAbsGap is constant for a gap's life (afterSwap only raises it, and only
+        // for wideners after the task-2 fix), so N legs at rate f(maxAbsGap) sum to
+        // exactly what one leg of the same total notional pays.
+        //
+        // Trade-off, stated rather than hidden: a swap arriving when the gap is nearly
+        // closed still pays the peak rate. That is the partial-close overcharge already
+        // documented in idea.md §6, slightly enlarged and still bounded by surchargeCapBps.
+        Gap storage gp = _gaps[id][idx];
         uint128 surcharge = SurchargeMath.compute(
             uint256(-params.amountSpecified),
-            GapMath.abs(gapBefore),
+            gp.maxAbsGap,
             c.captureRateBps,
             c.surchargeCapBps
         );
@@ -329,13 +347,12 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         Currency spec = params.zeroForOne ? key.currency0 : key.currency1;
         poolManager.mint(address(this), spec.toId(), surcharge);
 
-        Gap storage g = _gaps[id][idx];
-        if (g.escrowed == 0) {
-            g.isCurrency0 = params.zeroForOne;
+        if (gp.escrowed == 0) {
+            gp.isCurrency0 = params.zeroForOne;
         } else {
-            assert(g.isCurrency0 == params.zeroForOne);
+            assert(gp.isCurrency0 == params.zeroForOne);
         }
-        g.escrowed += surcharge;
+        gp.escrowed += surcharge;
 
         emit Surcharged(id, idx, tx.origin, surcharge);
 
