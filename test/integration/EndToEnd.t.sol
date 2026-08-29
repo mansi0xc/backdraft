@@ -76,7 +76,7 @@ contract EndToEndTest is BackdraftTestBase {
         assertTrue(gapIdx > 0, "gap should open after Rohan");
 
         BackdraftHook.Gap memory g0 = hook.gapAt(poolId, gapIdx);
-        assertEq(g0.totalContribution, 0, "opening swap doesn't contribute");
+        assertGt(g0.totalContribution, 0, "Rohan opened the gap and must be credited for it");
 
         // ── Step 4: Retail widens further (into open gap) ────────────
         _swap(RETAIL, false, -100_000e18);  // more widening
@@ -90,9 +90,14 @@ contract EndToEndTest is BackdraftTestBase {
         uint128 retailContrib = hook.contribution(retailKey);
         assertGt(retailContrib, 0, "retail contribution recorded");
 
-        // Rohan made no contribution on the opening swap itself
+        // Rohan is the originator: his opening swap created the mispricing, so he
+        // holds the larger share of the ledger than Retail, who only widened it further.
         bytes32 rohanKey = keccak256(abi.encode(poolId, gapIdx, ROHAN));
-        assertEq(hook.contribution(rohanKey), 0, "rohan had no open gap to widen into");
+        uint128 rohanContrib = hook.contribution(rohanKey);
+        assertGt(rohanContrib, 0, "rohan opened the gap and must be credited");
+        assertGt(rohanContrib, retailContrib, "originator's share exceeds the later widener's");
+        assertEq(rohanContrib + retailContrib, totalContribAfterRetail,
+            "ledger equals the sum of its contributors");
 
         // ── Step 5: Vik closes the gap (narrowing swap, surcharged) ──
         uint256 hookBalBefore = _hookBalance(poolKey.currency1); // oneForZero gap → currency1 spec
@@ -174,16 +179,18 @@ contract EndToEndTest is BackdraftTestBase {
         _swap(ROHAN, true, -1_000e18);  // tiny widening swap — detects the exogenous gap
 
         uint256 gapIdx = hook.openGapIdx(poolId);
-        if (gapIdx == 0) {
-            // Small swap didn't push tick far enough from ref — try a bigger one.
-            // The gap was already at -200 from oracle jump, so afterSwap should detect it.
-            // But the gap might not have opened if the swap went in the narrowing direction first.
-            // In this case, the test is inconclusive — skip gracefully.
-            return;
-        }
+        assertGt(gapIdx, 0, "trigger swap must open the exogenous gap");
 
+        // The trigger swap widened by a few ticks, so it earns a few ticks of credit —
+        // but the ~200 ticks that came from the external move are unexplained. The
+        // ledger therefore explains only a tiny fraction of maxAbsGap, and settlement
+        // routes almost everything to LPs. This is the mixed-gap case working
+        // correctly, not a contradiction of "exogenous means empty ledger".
         BackdraftHook.Gap memory gOpen = hook.gapAt(poolId, gapIdx);
-        assertEq(gOpen.totalContribution, 0, "exogenous gap: no contributions before first swap");
+        assertLt(
+            uint256(gOpen.totalContribution) * 10, uint256(gOpen.maxAbsGap),
+            "externally-caused portion of the gap must stay unexplained (<10% attributed)"
+        );
 
         // ── Vik closes the gap (narrowing: pool tick moves toward ref=200) ─
         // Pool tick is slightly below 0, ref=200. Gap is negative (pool < ref).

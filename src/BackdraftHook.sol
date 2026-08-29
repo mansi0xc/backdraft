@@ -91,7 +91,20 @@ contract BackdraftHook is IHooks, IUnlockCallback {
 
     // Transient slot: cached |gap| from beforeSwap for afterSwap to read (same tx)
     // Using regular storage here because tstore is tx-scoped and we're on a single call path
-    mapping(PoolId => uint24) private _cachedAbsGapBefore;
+    /// @dev Per-swap scratch written by beforeSwap and read by afterSwap.
+    ///      Packs into one slot (uint24 + 2 bools). `wasNarrowing` is the swap's
+    ///      direction relative to the gap AT ENTRY — the only honest basis for
+    ///      attribution, because where a swap LANDS is gameable (an arbitrageur
+    ///      that overshoots ends up further from the reference than it started).
+    ///      `valid` is written on every beforeSwap path, including the frozen-oracle
+    ///      path, so afterSwap can never attribute using a cache from an earlier swap.
+    struct SwapCache {
+        uint24 absGapBefore;
+        bool   wasNarrowing;
+        bool   valid;
+    }
+
+    mapping(PoolId => SwapCache) private _swapCache;
 
     // Simple cumulative liquidity-added checkpoint for eligibility denominator
     // Keyed by poolId; stores (blockNumber => cumulative added)
@@ -107,6 +120,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     // =========================================================================
 
     event GapOpened(PoolId indexed id, uint256 gapIdx, int24 refTick, uint48 openBlock);
+    event Contributed(PoolId indexed id, uint256 gapIdx, address indexed trader, uint128 ticks);
     event GapClosed(PoolId indexed id, uint256 gapIdx, uint128 escrowed);
     event Surcharged(PoolId indexed id, uint256 gapIdx, address indexed swapper, uint128 amount);
     event Settled(PoolId indexed id, uint256 gapIdx, uint256 traderPot, uint256 lpPot);
@@ -253,11 +267,25 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         PoolCfg storage c = cfg[id];
 
         (int24 refTick, bool ok) = referenceOracle.getRefTick(id);
-        if (!ok) return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+        if (!ok) {
+            // Invalidate the cache: afterSwap must not attribute this swap using
+            // direction data from a previous one.
+            _swapCache[id] = SwapCache({absGapBefore: 0, wasNarrowing: false, valid: false});
+            return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+        }
 
         (, int24 tick,,) = StateLibrary.getSlot0(poolManager, id);
         int24 gapBefore = tick - refTick;
-        _cachedAbsGapBefore[id] = GapMath.abs(gapBefore);
+
+        // Direction is decided here, on the PRE-swap gap, and cached for afterSwap.
+        // Computed before every early return below: a swap that is not surcharged
+        // (exact-output, no open gap) can still be a legitimate widener.
+        bool narrowing = GapMath.isNarrowing(gapBefore, params.zeroForOne);
+        _swapCache[id] = SwapCache({
+            absGapBefore: GapMath.abs(gapBefore),
+            wasNarrowing: narrowing,
+            valid:        true
+        });
 
         uint256 idx = openGapIdx[id];
         if (idx == 0) return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
@@ -265,8 +293,8 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         // Only exact-input swaps are surcharged (amountSpecified < 0)
         if (params.amountSpecified >= 0) return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
 
-        bool narrowing = GapMath.isNarrowing(gapBefore, params.zeroForOne);
-        if (!narrowing) return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+        bool narrowingSwap = narrowing;
+        if (!narrowingSwap) return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
 
         uint128 surcharge = SurchargeMath.compute(
             uint256(-params.amountSpecified),
@@ -316,27 +344,38 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         uint24 absNow = GapMath.abs(gapNow);
 
         uint256 idx = openGapIdx[id];
+        SwapCache memory sc = _swapCache[id];
+
+        // A swap earns ledger credit only if it ENTERED moving away from the
+        // reference. Direction at entry, never final position: an arbitrageur that
+        // overshoots ends up further from the reference than it started, and under
+        // the old `absNow > absBefore` test that made the corrector the pool's
+        // largest "contributor" — the exact rebate-to-the-arbitrageur failure that
+        // killed the own-pool-EMA design (appendix §5).
+        bool creditable = sc.valid && !sc.wasNarrowing;
 
         if (idx == 0) {
-            // No open gap — check if this swap opened one
+            // No gap was open. If this swap opened one, the swap that opened it is
+            // the originator and must be credited — previously this branch returned
+            // early, so the trader who created the mispricing received nothing and
+            // the ledger could only ever be filled by later swaps.
             if (absNow > c.gapThresholdTicks) {
                 _openGap(id, refTick, tick, gapNow);
+                _credit(id, openGapIdx[id], sc.absGapBefore, absNow, creditable);
             }
             return (IHooks.afterSwap.selector, 0);
         }
 
         Gap storage g = _gaps[id][idx];
-        uint24 absBefore = _cachedAbsGapBefore[id];
 
-        // Credit widening swaps to the ledger
-        if (absNow > absBefore) {
-            uint128 d = uint128(absNow - absBefore);
-            contribution[_contributionKey(id, idx, tx.origin)] += d;
-            g.totalContribution += d;
-        }
+        _credit(id, idx, sc.absGapBefore, absNow, creditable);
 
-        // Track max abs gap for the poisoning-defence denominator (§3.3)
-        if (absNow > g.maxAbsGap) g.maxAbsGap = absNow;
+        // maxAbsGap is the denominator of the poisoning defence (§3.3) and must
+        // track only how wide WIDENERS pushed the gap. A narrowing swap can only
+        // exceed it by overshooting, and counting that overshoot would inflate the
+        // denominator, shrink `explained`, and silently move value from the trader
+        // pot to LPs on every overshot close.
+        if (creditable && absNow > g.maxAbsGap) g.maxAbsGap = absNow;
 
         // Close on: narrowed under threshold, OR overshoot (sign flip)
         // Sign flip must close — otherwise escrow currency direction is ambiguous (§3.2)
@@ -451,6 +490,28 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     // =========================================================================
     // Internals
     // =========================================================================
+
+    /// @notice Credit a widening swap to the gap's contribution ledger.
+    /// @param  absBefore |gap| at swap entry
+    /// @param  absNow    |gap| at swap exit
+    /// @param  creditable false for correctors (entered narrowing) and for swaps
+    ///         whose direction could not be established
+    /// @dev    Credits only the INCREMENT this swap added. On a gap that was already
+    ///         partly open from an external move, the pre-existing portion stays
+    ///         unexplained, so `explained = totalContribution / maxAbsGap` falls
+    ///         below 1 and settlement routes that share to LPs. Mixed
+    ///         exogenous/endogenous gaps therefore split correctly with no extra
+    ///         branch — the same property that makes an empty ledger mean "wholly
+    ///         exogenous".
+    function _credit(PoolId id, uint256 idx, uint24 absBefore, uint24 absNow, bool creditable)
+        internal
+    {
+        if (!creditable || absNow <= absBefore) return;
+        uint128 d = uint128(absNow - absBefore);
+        contribution[_contributionKey(id, idx, tx.origin)] += d;
+        _gaps[id][idx].totalContribution += d;
+        emit Contributed(id, idx, tx.origin, d);
+    }
 
     function _openGap(PoolId id, int24 refTick, int24 tickNow, int24 gapNow) internal {
         PoolCfg storage c = cfg[id];

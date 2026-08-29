@@ -110,25 +110,29 @@ contract SpikeTest is BackdraftTestBase {
         assertTrue(g.gapPositive); // tick went up, gap is positive
     }
 
-    /// @notice Widening swap credits the sender in the contribution ledger.
-    ///         The swap that OPENS the gap exits early (before contribution logic).
-    ///         A second widening swap into the already-open gap is what gets credited.
+    /// @notice Widening swaps credit the sender in the contribution ledger.
+    ///         The swap that OPENS the gap is the originator and IS credited — it is
+    ///         the trader whose price impact created the mispricing, and crediting it
+    ///         is the whole point of the ledger. Further widening swaps accumulate.
     function test_WideningSwapCredited() public {
         _addLiquidity(address(this), -6000, 6000, 10_000_000e18);
 
-        // Swap 1: opens the gap but does NOT record contribution (early return in afterSwap)
+        // Swap 1: opens the gap AND is credited as the originator
         _swap(ROHAN, false, -500_000e18);
         uint256 idx = hook.openGapIdx(poolId);
         assertGt(idx, 0, "gap should be open after first swap");
 
         BackdraftHook.Gap memory g1 = hook.gapAt(poolId, idx);
-        assertEq(g1.totalContribution, 0, "opening swap doesn't contribute (early return)");
+        assertGt(g1.totalContribution, 0, "opening swap IS the originator and must be credited");
+        assertGt(hook.contribution(keccak256(abi.encode(poolId, idx, ROHAN))), 0,
+            "credit must be attributed to the opening swapper");
 
-        // Swap 2: a second widening swap into the open gap IS credited
+        // Swap 2: a second widening swap accumulates on top
         _swap(ROHAN, false, -200_000e18);
 
         BackdraftHook.Gap memory g2 = hook.gapAt(poolId, idx);
-        assertGt(g2.totalContribution, 0, "second widening swap should be credited");
+        assertGt(g2.totalContribution, g1.totalContribution,
+            "second widening swap should add further credit");
     }
 
     /// @notice Sign flip (overshoot past ref) closes the gap immediately.
