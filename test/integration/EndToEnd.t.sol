@@ -126,22 +126,16 @@ contract EndToEndTest is BackdraftTestBase {
         assertGt(retailToken0After, retailToken0Before, "retail should receive trader payout");
 
         // ── Step 8: LP_old claims LP pot ─────────────────────────────
-        bytes32 lpOldPosKey = keccak256(abi.encode(
-            poolId, LP_OLD, int24(-6000), int24(6000), bytes32(0)
-        ));
         uint256 lpOldToken0Before = token0.balanceOf(LP_OLD);
-        vm.prank(LP_OLD);
-        hook.claimLp(poolId, gapIdx, lpOldPosKey);
+        vm.prank(LP_OLD, LP_OLD);
+        hook.claimLp(poolId, gapIdx, int24(-6000), int24(6000), bytes32(0));
         uint256 lpOldToken0After = token0.balanceOf(LP_OLD);
         assertGt(lpOldToken0After, lpOldToken0Before, "LP_old should receive LP payout");
 
         // ── Step 9: LP_new claim reverts (too new) ───────────────────
-        bytes32 lpNewPosKey = keccak256(abi.encode(
-            poolId, LP_NEW, int24(-6000), int24(6000), bytes32(0)
-        ));
-        vm.prank(LP_NEW);
+        vm.prank(LP_NEW, LP_NEW);
         vm.expectRevert(abi.encodeWithSignature("Error(string)", "too new"));
-        hook.claimLp(poolId, gapIdx, lpNewPosKey);
+        hook.claimLp(poolId, gapIdx, int24(-6000), int24(6000), bytes32(0));
 
         // ── Step 10: Conservation check ──────────────────────────────
         // After all valid claims, hook's ERC-6909 should be ~0 (rounding dust OK).
@@ -210,15 +204,11 @@ contract EndToEndTest is BackdraftTestBase {
         // ── LP_old claims and gets everything ────────────────────────
         // traderPot = 0 (totalContribution == 0 → _traderPot returns 0)
         // lpPot = escrowed - 0 = escrowed
-        bytes32 lpOldPosKey = keccak256(abi.encode(
-            poolId, LP_OLD, int24(-6000), int24(6000), bytes32(0)
-        ));
-
         uint256 token0Before = token0.balanceOf(LP_OLD);
         uint256 token1Before = token1.balanceOf(LP_OLD);
 
-        vm.prank(LP_OLD);
-        hook.claimLp(poolId, gapIdx, lpOldPosKey);
+        vm.prank(LP_OLD, LP_OLD);
+        hook.claimLp(poolId, gapIdx, int24(-6000), int24(6000), bytes32(0));
 
         uint256 token0After = token0.balanceOf(LP_OLD);
         uint256 token1After = token1.balanceOf(LP_OLD);

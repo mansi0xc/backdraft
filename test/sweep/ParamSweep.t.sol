@@ -148,12 +148,9 @@ contract ParamSweepTest is Test {
         }
 
         // Claim LP
-        bytes32 lpPosKey = keccak256(abi.encode(
-            h.poolId(), LP, TICK_LOWER, TICK_UPPER, bytes32(0)
-        ));
         uint256 gasPreLpClaim = gasleft();
         vm.prank(LP, LP);
-        try h.hook().claimLp(h.poolId(), gapIdx, lpPosKey) {
+        try h.hook().claimLp(h.poolId(), gapIdx, TICK_LOWER, TICK_UPPER, bytes32(0)) {
             r.gasClaimLp = gasPreLpClaim - gasleft();
         } catch {}
     }
@@ -283,13 +280,9 @@ contract GasTableTest is BackdraftTestBase {
         _swap(VIK, true, -1_000_000e18);
         hook.settle(poolId, gapIdx);
 
-        bytes32 lpPosKey = keccak256(abi.encode(
-            poolId, LP, int24(-6000), int24(6000), bytes32(0)
-        ));
-
         uint256 g = gasleft();
         vm.prank(LP, LP);
-        hook.claimLp(poolId, gapIdx, lpPosKey);
+        hook.claimLp(poolId, gapIdx, int24(-6000), int24(6000), bytes32(0));
         console.log("gas claimLp():", g - gasleft());
     }
 

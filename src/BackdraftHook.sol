@@ -415,12 +415,27 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         emit TraderClaimed(id, gapIdx, msg.sender, owed);
     }
 
-    function claimLp(PoolId id, uint256 gapIdx, bytes32 positionKey) external {
+    /// @notice Claim an LP's share of a settled gap's escrow.
+    /// @dev    The position key is DERIVED from msg.sender — never accepted as an
+    ///         argument. Taking it as a parameter let any address pass another LP's
+    ///         key and be paid, because every input to _positionKey (poolId, owner,
+    ///         ticks, salt) is public or enumerable from events.
+    ///         Known limitation: positions are recorded against tx.origin in
+    ///         beforeAddLiquidity (the router is `sender`), so an LP must claim from
+    ///         the same EOA that added the liquidity. Smart-contract wallets and
+    ///         ERC-4337 accounts cannot claim. Documented in the README alongside the
+    ///         existing tx.origin attribution limitation.
+    function claimLp(PoolId id, uint256 gapIdx, int24 tickLower, int24 tickUpper, bytes32 salt)
+        external
+    {
+        bytes32 positionKey = _positionKey(id, msg.sender, tickLower, tickUpper, salt);
+
         Gap storage g = _gaps[id][gapIdx];
         require(g.settled, "not settled");
         require(!lpClaimed[positionKey][gapIdx], "claimed");
 
         PositionInfo memory p = positions[positionKey];
+        require(p.liquidity > 0, "no position");
         require(EligibilityLib.isEligible(p.addBlock, g.openBlock, cfg[id].minAgeBlocks), "too new");
         require(EligibilityLib.isInRange(p.tickLower, p.tickUpper, g.tickAtOpen), "out of range");
 
@@ -541,6 +556,15 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     // =========================================================================
     // View helpers
     // =========================================================================
+
+    /// @notice Compute the storage key for a position. Read-only convenience for
+    ///         off-chain callers and tests; claimLp derives its own key from
+    ///         msg.sender and never trusts a caller-supplied one.
+    function positionKeyFor(PoolId id, address lpOwner, int24 tickLower, int24 tickUpper, bytes32 salt)
+        external pure returns (bytes32)
+    {
+        return _positionKey(id, lpOwner, tickLower, tickUpper, salt);
+    }
 
     function gaps(PoolId id) external view returns (Gap[] memory) {
         return _gaps[id];

@@ -112,13 +112,13 @@ contract SolvencyHandler is BackdraftTestBase {
         BackdraftHook.Gap memory g = hook.gapAt(poolId, idx);
         if (!g.settled) return;
 
-        bytes32 posKey = keccak256(abi.encode(
+        bytes32 posKey = hook.positionKeyFor(
             poolId, actors[actorIdx], int24(-6000), int24(6000), bytes32(0)
-        ));
+        );
         if (hook.lpClaimed(posKey, idx)) return;
 
         vm.prank(actors[actorIdx], actors[actorIdx]);
-        try hook.claimLp(poolId, idx, posKey) {} catch {}
+        try hook.claimLp(poolId, idx, int24(-6000), int24(6000), bytes32(0)) {} catch {}
         _syncEscrowGhost();
     }
 
