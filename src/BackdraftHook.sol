@@ -98,8 +98,17 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     ///      that overshoots ends up further from the reference than it started).
     ///      `valid` is written on every beforeSwap path, including the frozen-oracle
     ///      path, so afterSwap can never attribute using a cache from an earlier swap.
+    ///      R3: `refTick` is cached here so afterSwap does not re-read the oracle.
+    ///      getRefTick performs two slot0 reads plus an observe() — three external calls
+    ///      — and calling it from both beforeSwap and afterSwap made six per swap, about
+    ///      148k gas at the measured 74k per read. The external v3 pools cannot move
+    ///      during our own v4 swap, so the second read could only ever return the same
+    ///      value. Caching also removes a real inconsistency: beforeSwap seeing ok=true
+    ///      and afterSwap seeing ok=false within one transaction, which would surcharge
+    ///      a swap and then decline to record the gap it belongs to.
     struct SwapCache {
         uint24 absGapBefore;
+        int24  refTick;
         bool   wasNarrowing;
         bool   valid;
     }
@@ -270,7 +279,9 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         if (!ok) {
             // Invalidate the cache: afterSwap must not attribute this swap using
             // direction data from a previous one.
-            _swapCache[id] = SwapCache({absGapBefore: 0, wasNarrowing: false, valid: false});
+            _swapCache[id] = SwapCache({
+                absGapBefore: 0, refTick: 0, wasNarrowing: false, valid: false
+            });
             return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
         }
 
@@ -283,6 +294,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         bool narrowing = GapMath.isNarrowing(gapBefore, params.zeroForOne);
         _swapCache[id] = SwapCache({
             absGapBefore: GapMath.abs(gapBefore),
+            refTick:      refTick,
             wasNarrowing: narrowing,
             valid:        true
         });
@@ -375,15 +387,19 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         PoolId id = key.toId();
         PoolCfg storage c = cfg[id];
 
-        (int24 refTick, bool ok) = referenceOracle.getRefTick(id);
-        if (!ok) return (IHooks.afterSwap.selector, 0);
+        // R3: reuse beforeSwap's reference read rather than making three more external
+        // calls. PoolManager always invokes beforeSwap immediately before the swap and
+        // afterSwap immediately after, in the same transaction, so the cache is fresh by
+        // construction. An invalid cache means beforeSwap froze; afterSwap must too.
+        SwapCache memory sc = _swapCache[id];
+        if (!sc.valid) return (IHooks.afterSwap.selector, 0);
+        int24 refTick = sc.refTick;
 
         (, int24 tick,,) = StateLibrary.getSlot0(poolManager, id);
         int24 gapNow  = tick - refTick;
         uint24 absNow = GapMath.abs(gapNow);
 
         uint256 idx = openGapIdx[id];
-        SwapCache memory sc = _swapCache[id];
 
         // A swap earns ledger credit only if it ENTERED moving away from the
         // reference. Direction at entry, never final position: an arbitrageur that
