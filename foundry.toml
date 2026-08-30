@@ -8,6 +8,7 @@ solc = "0.8.26"
 optimizer = true
 optimizer_runs = 1_000_000
 via_ir = true
+gas_limit = "9999999999999999"
 fuzz = { runs = 10_000 }
 invariant = { runs = 256, depth = 15 }
 
