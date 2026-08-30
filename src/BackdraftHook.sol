@@ -53,6 +53,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         uint16  traderShareBps;     // alpha
         uint32  minAgeBlocks;
         uint32  expiryBlocks;
+        uint32  sweepGraceBlocks;   // delay after expiry before unclaimed funds return to LPs
         bool    invertTicks;        // true if v3 and v4 ordering differ
     }
 
@@ -64,10 +65,13 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         uint128 eligibleLiqAtOpen;
         uint128 escrowed;
         uint128 totalContribution;  // sum of tick-widening across all contributors
+        uint128 lpPaid;             // cumulative LP claims — caps the pot (see claimLp)
+        uint128 traderPaid;         // cumulative trader claims — caps the pot
         uint24  maxAbsGap;          // largest |gap| reached — denominator of poisoning defence
         bool    gapPositive;        // sign at open; sign flip CLOSES the gap
         bool    isCurrency0;        // set on first surcharge, then asserted
         bool    settled;
+        bool    swept;
     }
 
     struct PositionInfo {
@@ -133,6 +137,10 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     ///         about, merely relocated.
     mapping(address => bool) public allowedRouters;
 
+    /// @dev Kept so sweepUnclaimed() can call donate(). The individual currencies are
+    ///      already cached for payouts; donate needs the whole key.
+    mapping(PoolId => PoolKey) private _poolKeys;
+
     // Simple cumulative liquidity-added checkpoint for eligibility denominator
     // Keyed by poolId; stores (blockNumber => cumulative added)
     // Full OZ Checkpoints would be ideal — this is a simplified version
@@ -151,6 +159,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     ///         a named error rather than assert() so a trace says which invariant broke.
     error EscrowCurrencyMismatch(PoolId id, uint256 gapIdx);
 
+    event SweptToLps(PoolId indexed id, uint256 gapIdx, uint256 amount);
     event RouterAllowed(address indexed router, bool allowed);
     event UnattributedAction(PoolId indexed id, address indexed router);
 
@@ -240,6 +249,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         require(msg.sender == address(poolManager), "not PM");
         PoolId id = key.toId();
         // Store currencies for payout — needed by _payout since we only have PoolId there
+        _poolKeys[id]  = key;
         _currency0[id] = key.currency0;
         _currency1[id] = key.currency1;
         // Push sentinel at index 0 so openGapIdx==0 unambiguously means "no open gap".
@@ -247,7 +257,8 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         _gaps[id].push(Gap({
             openBlock: 0, expiryBlock: 0, refTickAtOpen: 0, tickAtOpen: 0,
             eligibleLiqAtOpen: 0, escrowed: 0, totalContribution: 0,
-            maxAbsGap: 0, gapPositive: false, isCurrency0: false, settled: true
+            lpPaid: 0, traderPaid: 0,
+            maxAbsGap: 0, gapPositive: false, isCurrency0: false, settled: true, swept: true
         }));
         return IHooks.afterInitialize.selector;
     }
@@ -572,6 +583,37 @@ contract BackdraftHook is IHooks, IUnlockCallback {
              / (uint256(g.maxAbsGap) * 10_000);
     }
 
+    /// @notice Return a settled gap's unclaimed remainder to the pool's LPs.
+    /// @dev    Permissionless, and only after the gap has been settled and expired plus
+    ///         a grace period, so eligible claimants have had their window.
+    ///
+    ///         This exists because escrow could otherwise be stranded forever. The
+    ///         eligibility denominator is pool-wide in-range liquidity minus recent
+    ///         adds, while claims come from individual positions — when the denominator
+    ///         exceeds the claimants (out-of-range liquidity at gap open, positions
+    ///         added through a non-allowlisted router, LPs who simply never claim) the
+    ///         difference has no owner and no route out. There is no owner withdrawal
+    ///         and no treasury: the remainder is donated back into the pool, which
+    ///         credits current in-range LPs. Nothing here requires trusting the admin.
+    function sweepUnclaimed(PoolId id, uint256 gapIdx) external {
+        Gap storage g = _gaps[id][gapIdx];
+        require(g.settled, "not settled");
+        require(!g.swept, "swept");
+        require(block.number > uint256(g.expiryBlock) + cfg[id].sweepGraceBlocks, "too early");
+
+        uint256 traderPot = _traderPot(id, g);
+        uint256 lpPot     = uint256(g.escrowed) - traderPot;
+        uint256 remainder = (lpPot - uint256(g.lpPaid)) + (traderPot - uint256(g.traderPaid));
+        g.swept = true;
+        if (remainder == 0) return;
+
+        Currency cur = g.isCurrency0 ? _currency0[id] : _currency1[id];
+        poolManager.unlock(abi.encode(PayoutData({
+            currency: cur, to: address(0), amount: remainder, isDonate: true, key: _poolKeys[id]
+        })));
+        emit SweptToLps(id, gapIdx, remainder);
+    }
+
     function claimTrader(PoolId id, uint256 gapIdx) external {
         Gap storage g = _gaps[id][gapIdx];
         require(g.settled && g.totalContribution > 0, "n/a");
@@ -581,6 +623,12 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         contribution[k] = 0;
 
         uint256 owed = (_traderPot(id, g) * c) / g.totalContribution;
+
+        // Same cap as claimLp, for the same reason: never pay a gap more than it holds.
+        uint256 remaining = _traderPot(id, g) - uint256(g.traderPaid);
+        if (owed > remaining) owed = remaining;
+        g.traderPaid += uint128(owed);
+
         _payout(id, g, msg.sender, owed);
         emit TraderClaimed(id, gapIdx, msg.sender, owed);
     }
@@ -612,6 +660,24 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         uint256 lpPot = uint256(g.escrowed) - _traderPot(id, g);
         require(g.eligibleLiqAtOpen > 0, "no eligible liq");
         uint256 owed = (lpPot * uint256(p.liquidity)) / uint256(g.eligibleLiqAtOpen);
+
+        // Cap against what this gap still owes. `eligibleLiqAtOpen` is derived from
+        // pool-wide in-range liquidity minus recent adds, while claims sum over each
+        // eligible position's own `p.liquidity` — two different quantities with no
+        // structural guarantee that the second is bounded by the first.
+        //
+        // They diverge without any malice. An LP who adds in-range inside the lookback
+        // window and whose range then falls OUT of range before the gap opens is
+        // subtracted from the denominator but contributes nothing to the numerator, so
+        // every other LP's share is scaled up. Measured shape: 10M eligible + 5M
+        // subtracted leaves a 5M denominator against a 10M claimant — 200% of the pot.
+        //
+        // Escrow is held as one undifferentiated ERC-6909 balance, so an over-claim on
+        // one gap is paid out of OTHER gaps' escrow. The cap turns a cross-gap solvency
+        // leak into a bounded shortfall on the affected gap alone.
+        uint256 remaining = lpPot - uint256(g.lpPaid);
+        if (owed > remaining) owed = remaining;
+        g.lpPaid += uint128(owed);
 
         lpClaimed[positionKey][gapIdx] = true;
         _payout(id, g, msg.sender, owed);
@@ -666,10 +732,13 @@ contract BackdraftHook is IHooks, IUnlockCallback {
             eligibleLiqAtOpen: eligibleLiq,
             escrowed:         0,
             totalContribution: 0,
+            lpPaid:           0,
+            traderPaid:       0,
             maxAbsGap:        GapMath.abs(gapNow),
             gapPositive:      gapNow > 0,
             isCurrency0:      false,
-            settled:          false
+            settled:          false,
+            swept:            false
         }));
 
         uint256 newIdx = _gaps[id].length - 1;
@@ -689,8 +758,10 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     // Encoded payload for unlockCallback — used by claimTrader/claimLp
     struct PayoutData {
         Currency currency;
-        address  to;
+        address  to;        // ignored when isDonate
         uint256  amount;
+        bool     isDonate;  // true => donate to the pool's LPs instead of transferring
+        PoolKey  key;       // only used when isDonate
     }
 
     /// @notice IUnlockCallback — called back by PoolManager during claim payouts.
@@ -700,7 +771,15 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         require(msg.sender == address(poolManager), "not PM");
         PayoutData memory p = abi.decode(data, (PayoutData));
         poolManager.burn(address(this), p.currency.toId(), p.amount);
-        poolManager.take(p.currency, p.to, p.amount);
+        if (p.isDonate) {
+            // Return the remainder to the pool's current LPs rather than to an admin.
+            // donate() credits in-range liquidity directly, so unclaimed LP capture goes
+            // back to LPs — no treasury, no owner discretion, nothing to trust.
+            bool zero = Currency.unwrap(p.currency) == Currency.unwrap(p.key.currency0);
+            poolManager.donate(p.key, zero ? p.amount : 0, zero ? 0 : p.amount, "");
+        } else {
+            poolManager.take(p.currency, p.to, p.amount);
+        }
         return "";
     }
 
@@ -708,7 +787,9 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         if (amount == 0) return;
         Currency cur = g.isCurrency0 ? _currency0[id] : _currency1[id];
         // burn+take require an unlock context; claim functions are called outside swaps.
-        poolManager.unlock(abi.encode(PayoutData({currency: cur, to: to, amount: amount})));
+        poolManager.unlock(abi.encode(PayoutData({
+            currency: cur, to: to, amount: amount, isDonate: false, key: _poolKeys[id]
+        })));
     }
 
     function _contributionKey(PoolId id, uint256 gapIdx, address addr) internal pure returns (bytes32) {

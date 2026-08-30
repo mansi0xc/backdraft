@@ -58,6 +58,7 @@ abstract contract BackdraftTestBase is Test {
     uint16 public surchargeCapBps  = 200;
     uint16 public traderShareBps   = 5000; // 50% alpha
     uint32 public minAgeBlocks     = 100;
+    uint32 public sweepGraceBlocks = 500;
     uint32 public expiryBlocks     = 1000;
     uint24 public gapThresholdTicks = 65;
 
@@ -140,6 +141,7 @@ abstract contract BackdraftTestBase is Test {
             traderShareBps:    traderShareBps,
             minAgeBlocks:      minAgeBlocks,
             expiryBlocks:      expiryBlocks,
+            sweepGraceBlocks:  sweepGraceBlocks,
             invertTicks:       false
         }));
 
