@@ -158,7 +158,7 @@ contract AttributionTest is BackdraftTestBase {
         _swap(VIK, true, -2_000_000e18);
 
         assertGt(hook.gapAt(poolId, idx).escrowed, 0, "precondition: surcharge escrowed");
-        hook.settle(poolId, idx);
+        if (!hook.gapAt(poolId, idx).settled) hook.settle(poolId, idx);
 
         uint256 vBefore0 = token0.balanceOf(VIK);
         uint256 vBefore1 = token1.balanceOf(VIK);

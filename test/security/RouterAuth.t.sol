@@ -117,7 +117,7 @@ contract RouterAuthTest is BackdraftTestBase {
         _relayedSwap(swapRouter, ACCOUNT, BUNDLER, ACCOUNT, false, -500_000e18);
         uint256 idx = hook.openGapIdx(poolId);
         _swap(VIK, true, -2_000_000e18);
-        hook.settle(poolId, idx);
+        if (!hook.gapAt(poolId, idx).settled) hook.settle(poolId, idx);
 
         vm.prank(BUNDLER, BUNDLER);
         vm.expectRevert(abi.encodeWithSignature("Error(string)", "nothing"));

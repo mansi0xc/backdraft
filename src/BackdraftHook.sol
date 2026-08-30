@@ -361,6 +361,16 @@ contract BackdraftHook is IHooks, IUnlockCallback {
 
         uint256 idx = openGapIdx[id];
 
+        // An expired gap must stop charging. Nothing on the swap path read expiryBlock,
+        // so a gap whose dislocation vanished — because the REFERENCE moved back and no
+        // swap occurred, which the hook never sees — stayed open indefinitely, and the
+        // next swap that happened to be narrowing against a 2-tick residual paid the
+        // full maxAbsGap peak rate. One innocent trader eating a stale surcharge.
+        if (idx != 0 && block.number > _gaps[id][idx].expiryBlock) {
+            _closeGap(id, idx);
+            idx = 0;
+        }
+
         if (idx == 0) {
             // A gap that already exceeds the threshold BEFORE this swap was not
             // created by it — the external market moved while this pool sat stale.
@@ -746,9 +756,20 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         emit GapOpened(id, newIdx, refTick, openBlock);
     }
 
+    /// @dev Settles as it closes. settle() is permissionless and pays its caller
+    ///      nothing, so in practice nobody would ever call it: gaps would close, escrow
+    ///      would sit unsettled, and no claim could be made because claimTrader and
+    ///      claimLp both require g.settled. Settling here costs one storage write on a
+    ///      path that is already writing, and makes the claim path reachable without
+    ///      relying on an altruistic keeper.
     function _closeGap(PoolId id, uint256 idx) internal {
         openGapIdx[id] = 0;
-        emit GapClosed(id, idx, _gaps[id][idx].escrowed);
+        Gap storage g = _gaps[id][idx];
+        if (!g.settled) {
+            g.settled = true;
+            emit Settled(id, idx, _traderPot(id, g), uint256(g.escrowed) - _traderPot(id, g));
+        }
+        emit GapClosed(id, idx, g.escrowed);
     }
 
     function _isGapOpen(PoolId id, uint256 idx) internal view returns (bool) {

@@ -242,7 +242,7 @@ contract GasTableTest is BackdraftTestBase {
 
         uint256 gapIdx = 1; // first real gap
         uint256 g = gasleft();
-        hook.settle(poolId, gapIdx);
+        if (!hook.gapAt(poolId, gapIdx).settled) hook.settle(poolId, gapIdx);
         console.log("gas settle():", g - gasleft());
     }
 
@@ -257,7 +257,7 @@ contract GasTableTest is BackdraftTestBase {
         _swap(ROHAN, false, -100_000e18);
         _swap(VIK, true, -1_000_000e18); // close + surcharge
 
-        hook.settle(poolId, gapIdx);
+        if (!hook.gapAt(poolId, gapIdx).settled) hook.settle(poolId, gapIdx);
 
         bytes32 rohanKey = keccak256(abi.encode(poolId, gapIdx, ROHAN));
         if (hook.contribution(rohanKey) == 0) return;
@@ -278,7 +278,7 @@ contract GasTableTest is BackdraftTestBase {
         if (gapIdx == 0) return;
 
         _swap(VIK, true, -1_000_000e18);
-        hook.settle(poolId, gapIdx);
+        if (!hook.gapAt(poolId, gapIdx).settled) hook.settle(poolId, gapIdx);
 
         uint256 g = gasleft();
         vm.prank(LP, LP);

@@ -56,7 +56,7 @@ contract ClaimAuthTest is BackdraftTestBase {
         uint128 escrowed = hook.gapAt(poolId, gapIdx).escrowed;
         assertGt(escrowed, 0, "precondition: surcharge must be escrowed");
 
-        hook.settle(poolId, gapIdx);
+        if (!hook.gapAt(poolId, gapIdx).settled) hook.settle(poolId, gapIdx);
         assertTrue(hook.gapAt(poolId, gapIdx).settled, "precondition: gap must settle");
     }
 
@@ -145,7 +145,7 @@ contract ClaimAuthTest is BackdraftTestBase {
 
         _swap(ROHAN, false, -200_000e18);          // credited widening
         _swap(VIK,   true,  -2_000_000e18);        // close + surcharge
-        hook.settle(poolId, gapIdx);
+        if (!hook.gapAt(poolId, gapIdx).settled) hook.settle(poolId, gapIdx);
 
         assertGt(hook.gapAt(poolId, gapIdx).totalContribution, 0,
             "precondition: ledger must be non-empty");

@@ -115,7 +115,7 @@ contract EndToEndTest is BackdraftTestBase {
         assertEq(hook.openGapIdx(poolId), 0, "gap should be closed after Vik");
 
         // ── Step 6: settle() ─────────────────────────────────────────
-        hook.settle(poolId, gapIdx);
+        if (!hook.gapAt(poolId, gapIdx).settled) hook.settle(poolId, gapIdx);
 
         BackdraftHook.Gap memory gFinal = hook.gapAt(poolId, gapIdx);
         assertTrue(gFinal.settled, "gap must be marked settled");
@@ -206,7 +206,7 @@ contract EndToEndTest is BackdraftTestBase {
         if (escrowed == 0) return; // gap closed with nothing surcharged — inconclusive
 
         // settle it
-        hook.settle(poolId, gapIdx);
+        if (!hook.gapAt(poolId, gapIdx).settled) hook.settle(poolId, gapIdx);
 
         // ── LP_old claims and gets everything ────────────────────────
         // traderPot = 0 (totalContribution == 0 → _traderPot returns 0)
@@ -238,7 +238,7 @@ contract EndToEndTest is BackdraftTestBase {
         _swap(ROHAN, false, -500_000e18);
 
         uint256 gapIdx = hook.openGapIdx(poolId);
-        if (gapIdx == 0) return;
+        assertGt(gapIdx, 0, "precondition: gap must be open");
 
         vm.expectRevert(abi.encodeWithSignature("Error(string)", "still open"));
         hook.settle(poolId, gapIdx);
@@ -259,7 +259,7 @@ contract EndToEndTest is BackdraftTestBase {
         vm.roll(g.expiryBlock + 1);
 
         // No revert — expiry allows settlement even with gap still "open"
-        hook.settle(poolId, gapIdx);
+        if (!hook.gapAt(poolId, gapIdx).settled) hook.settle(poolId, gapIdx);
         assertTrue(hook.gapAt(poolId, gapIdx).settled);
     }
 
@@ -272,7 +272,7 @@ contract EndToEndTest is BackdraftTestBase {
         _swap(ROHAN, false, -500_000e18); // open gap
 
         BackdraftHook.Gap[] memory allGaps = hook.gaps(poolId);
-        if (allGaps.length <= 1) return; // only sentinel, gap didn't open
+        assertGt(allGaps.length, 1, "precondition: gap must open");
 
         uint256 latestIdx = allGaps.length - 1;
 
@@ -280,7 +280,7 @@ contract EndToEndTest is BackdraftTestBase {
         BackdraftHook.Gap memory g = hook.gapAt(poolId, latestIdx);
         vm.roll(g.expiryBlock + 1);
 
-        hook.settle(poolId, latestIdx);
+        if (!hook.gapAt(poolId, latestIdx).settled) hook.settle(poolId, latestIdx);
         assertTrue(hook.gapAt(poolId, latestIdx).settled);
 
         vm.expectRevert(abi.encodeWithSignature("Error(string)", "already settled"));
