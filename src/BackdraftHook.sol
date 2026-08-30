@@ -9,6 +9,7 @@ import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {BalanceDelta}    from "v4-core/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary, toBeforeSwapDelta} from "v4-core/types/BeforeSwapDelta.sol";
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
+import {Hooks}            from "v4-core/libraries/Hooks.sol";
 import {Hooks}           from "v4-core/libraries/Hooks.sol";
 import {StateLibrary}    from "v4-core/libraries/StateLibrary.sol";
 import {FullMath}        from "v4-core/libraries/FullMath.sol";
@@ -168,6 +169,11 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     constructor(IPoolManager _poolManager, IReferencePrice _referenceOracle, address _owner) {
         poolManager = _poolManager;
         referenceOracle = _referenceOracle;
+
+        // Assert the deployed address encodes exactly the permission bits declared in
+        // getHookPermissions(). Without this a mis-mined CREATE2 salt yields a hook that
+        // silently never receives beforeSwap — discovered live, not in tests.
+        Hooks.validateHookPermissions(this, getHookPermissions());
         owner = _owner;
     }
 
@@ -271,9 +277,9 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         p.tickLower = params.tickLower;
         p.tickUpper = params.tickUpper;
 
-        // Track cumulative liquidity added for eligibility denominator
-        if (params.liquidityDelta > 0) {
-            _pushCheckpoint(id, uint128(uint256(int256(params.liquidityDelta))));
+        // Track NET recently-added IN-RANGE liquidity for the eligibility denominator.
+        if (params.liquidityDelta > 0 && _isInRange(id, params.tickLower, params.tickUpper)) {
+            _pushCheckpoint(id, uint128(uint256(int256(params.liquidityDelta))), true);
         }
 
         return IHooks.beforeAddLiquidity.selector;
@@ -294,6 +300,12 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         if (params.liquidityDelta < 0) {
             uint128 removed = uint128(uint256(-int256(params.liquidityDelta)));
             if (p.liquidity >= removed) p.liquidity -= removed;
+
+            // Mirror the add: withdrawing in-range liquidity must decrement the running
+            // total, or an add-then-remove permanently inflates `recentAdds`.
+            if (_isInRange(id, params.tickLower, params.tickUpper)) {
+                _pushCheckpoint(id, removed, false);
+            }
         }
         return IHooks.beforeRemoveLiquidity.selector;
     }
@@ -641,9 +653,10 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         uint128 addedNow   = _totalAdded[id];
         uint48  lookback   = openBlock > c.minAgeBlocks ? openBlock - c.minAgeBlocks : 0;
         uint128 addedThen  = _cumulativeAddedAt(id, lookback);
-        uint128 eligibleLiq = inRange > (addedNow - addedThen)
-            ? inRange - (addedNow - addedThen)
-            : 0;
+        // addedNow can now be BELOW addedThen (net removals since the lookback), so the
+        // difference must be clamped before it underflows a uint128.
+        uint128 recentAdds = addedNow > addedThen ? addedNow - addedThen : 0;
+        uint128 eligibleLiq = inRange > recentAdds ? inRange - recentAdds : 0;
 
         _gaps[id].push(Gap({
             openBlock:        openBlock,
@@ -750,10 +763,31 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     // Checkpoint helpers (simplified — OZ Checkpoints in production)
     // =========================================================================
 
-    function _pushCheckpoint(PoolId id, uint128 delta) internal {
-        _totalAdded[id] += delta;
+    /// @notice Record a change to the pool's recently-added in-range liquidity.
+    /// @dev    Previously this only ever incremented, so an add-then-remove left the
+    ///         cumulative permanently inflated. `eligibleLiq = inRange - recentAdds`
+    ///         then clamped to zero and `claimLp` reverted with "no eligible liq" for
+    ///         EVERY honest LP on gaps opened in that window — a griefing DoS on the LP
+    ///         leg costing an attacker a round trip plus gas. It now decrements on
+    ///         removal so the running total tracks NET recent adds.
+    function _pushCheckpoint(PoolId id, uint128 delta, bool isAdd) internal {
+        if (delta == 0) return;
+        uint128 cur = _totalAdded[id];
+        _totalAdded[id] = isAdd
+            ? cur + delta
+            : (cur > delta ? cur - delta : 0);
         _addedCheckpointBlocks[id].push(block.number);
         _addedCheckpointValues[id].push(_totalAdded[id]);
+    }
+
+    /// @dev A position only affects `getLiquidity(id)` — the in-range figure the
+    ///      eligibility denominator is built from — while the current tick sits inside
+    ///      its range. Counting out-of-range adds contaminated the subtraction with
+    ///      liquidity that was never in the minuend, letting an attacker inflate
+    ///      `recentAdds` with a position that contributes nothing to the pool.
+    function _isInRange(PoolId id, int24 tickLower, int24 tickUpper) internal view returns (bool) {
+        (, int24 tickNow,,) = StateLibrary.getSlot0(poolManager, id);
+        return tickLower <= tickNow && tickNow < tickUpper;
     }
 
     function _cumulativeAddedAt(PoolId id, uint48 blockNum) internal view returns (uint128) {
