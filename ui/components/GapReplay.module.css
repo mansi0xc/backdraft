@@ -1,0 +1,181 @@
+.panel {
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--ink-raise), var(--ink));
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 1.1rem;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+.modes {
+  display: inline-flex;
+  border: 1px solid var(--line);
+}
+.mode {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--cream-dim);
+  font-family: var(--sans);
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  padding: 0.5rem 0.9rem;
+  cursor: pointer;
+  transition: color 0.2s, background 0.2s;
+}
+.mode + .mode { border-left: 1px solid var(--line); }
+.mode:hover { color: var(--cream); }
+.modeOn { background: var(--ember); color: var(--ink); }
+.modeOn:hover { color: var(--ink); }
+
+.chip {
+  font-family: var(--sans);
+  font-size: 0.68rem;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  padding: 0.32rem 0.6rem;
+  border: 1px solid var(--line);
+  color: var(--cream-dim);
+  white-space: nowrap;
+}
+.chipOpen { color: var(--flame); border-color: color-mix(in oklab, var(--flame), transparent 55%); }
+.chipDone { color: var(--ember); border-color: var(--line-ember); }
+
+.chartWrap {
+  padding: 1.1rem 1.1rem 0.4rem;
+}
+.chart { display: block; width: 100%; height: auto; }
+
+.axisLabel {
+  font-family: var(--sans);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  fill: var(--ash);
+}
+.serifTag {
+  font-family: var(--serif);
+  font-size: 13px;
+  fill: var(--cream-dim);
+}
+
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.5rem 1.1rem 1.1rem;
+}
+.play {
+  appearance: none;
+  flex: none;
+  width: 2.4rem;
+  height: 2.4rem;
+  border: 1px solid var(--line-ember);
+  background: transparent;
+  color: var(--ember);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: background 0.2s, color 0.2s;
+}
+.play:hover { background: var(--ember); color: var(--ink); }
+.scrub {
+  flex: 1;
+  appearance: none;
+  height: 2px;
+  background: var(--line);
+  cursor: pointer;
+  accent-color: var(--ember);
+}
+.scrub::-webkit-slider-thumb {
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--ember);
+  cursor: pointer;
+}
+.scrub::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--ember);
+  cursor: pointer;
+}
+.block {
+  flex: none;
+  font-family: var(--sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  color: var(--ash);
+  min-width: 5.5rem;
+  text-align: right;
+}
+
+.readout {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border-top: 1px solid var(--line);
+}
+.cell {
+  padding: 1.1rem;
+  border-right: 1px solid var(--line);
+  min-height: 12rem;
+}
+.cell:last-child { border-right: 0; }
+.cellHead {
+  font-family: var(--sans);
+  font-size: 0.64rem;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ember);
+  margin-bottom: 0.85rem;
+}
+.line {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.82rem;
+  padding: 0.3rem 0;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--cream-dim);
+}
+.line b { color: var(--cream); font-weight: 500; }
+.lineActor { font-family: var(--serif); font-size: 0.92rem; color: var(--cream); }
+.num { font-variant-numeric: tabular-nums; }
+.big {
+  font-family: var(--serif);
+  font-size: 1.9rem;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  color: var(--cream);
+  margin: 0.4rem 0 0.1rem;
+}
+.bigEmber { color: var(--ember); }
+.muted { color: var(--ash); font-size: 0.78rem; line-height: 1.5; }
+.revert {
+  color: var(--flame);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  border-left: 1px solid color-mix(in oklab, var(--flame), transparent 55%);
+  padding-left: 0.6rem;
+  margin-top: 0.6rem;
+}
+
+@media (max-width: 780px) {
+  .readout { grid-template-columns: 1fr; }
+  .cell { border-right: 0; border-bottom: 1px solid var(--line); min-height: 0; }
+  .cell:last-child { border-bottom: 0; }
+}
