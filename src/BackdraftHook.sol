@@ -460,22 +460,11 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         if (multBps > DivergenceMath.ONE && surcharge != 0) {
             uint256 scaled = FullMath.mulDiv(uint256(surcharge), multBps, DivergenceMath.ONE);
 
-            // Two independent ceilings, and BOTH are required.
-            //
-            // `notional`: the escrow is taken out of the swapper's input, so it can
-            // never exceed it.
-            //
-            // `type(uint128).max`: `notional` is a uint256 and a large enough swap
-            // exceeds uint128. Clamping only to `notional` and casting would let the
-            // cast truncate silently — and truncation of a value just above 2^128
-            // yields a NEAR-ZERO surcharge, which is precisely the off-switch this
-            // whole change exists to remove, reintroduced through an arithmetic edge.
-            // Saturate rather than revert: reverting a swap is not an available answer
-            // on this path (see the freeze-not-revert principle in SplitV3Reference).
-            uint256 maxTake = notional < type(uint128).max ? notional : type(uint128).max;
-            if (scaled > maxTake) scaled = maxTake;
-
-            surcharge = uint128(scaled);
+            // Two ceilings, both load-bearing: the swapper's input, and the uint128 the
+            // escrow is stored in. See DivergenceMath.clampToEscrow — the second one is
+            // what stops a large enough swap from truncating the surcharge to near-zero
+            // and handing back the off-switch through an arithmetic edge.
+            surcharge = DivergenceMath.clampToEscrow(scaled, notional);
         }
 
         if (surcharge == 0) return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);

@@ -66,4 +66,33 @@ library DivergenceMath {
 
         return multBps > ceiling ? ceiling : multBps;
     }
+
+    /// @notice Clamp a multiplied surcharge into the uint128 the escrow is stored in.
+    ///
+    /// @param scaled   Surcharge after the multiplier, full uint256 precision
+    /// @param notional The swap's input amount — the escrow comes out of it
+    /// @return         min(scaled, notional, type(uint128).max)
+    ///
+    /// @dev Both ceilings are load-bearing, and the second is the non-obvious one.
+    ///
+    ///      `notional` bounds the take to what the swapper actually put in.
+    ///
+    ///      `type(uint128).max` exists because `notional` is itself a uint256. Clamping
+    ///      only to the notional and casting would let the cast truncate modulo 2^128,
+    ///      and truncating a value just above 2^128 yields a NEAR-ZERO surcharge — the
+    ///      off-switch this library exists to remove, reachable by making the swap large
+    ///      rather than by pushing the reference. Saturating is what keeps
+    ///      "no input produces a zero surcharge" true at every magnitude.
+    ///
+    ///      Saturate rather than revert: reverting a swap is not an available answer on
+    ///      the hook path (see the freeze-not-revert principle in SplitV3Reference).
+    ///
+    ///      Split out of the hook so the uint128 boundary is unit-testable. It is not
+    ///      reachable through a swap in the test harness — ERC20 supply would have to
+    ///      exceed ~3.4e39 — so an integration test cannot pin it and a mutation that
+    ///      deletes the saturation would otherwise survive silently.
+    function clampToEscrow(uint256 scaled, uint256 notional) internal pure returns (uint128) {
+        uint256 maxTake = notional < type(uint128).max ? notional : type(uint128).max;
+        return uint128(scaled > maxTake ? maxTake : scaled);
+    }
 }

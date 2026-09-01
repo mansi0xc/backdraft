@@ -98,13 +98,54 @@ contract GraduatedFeeTest is BackdraftTestBase {
         assertGt(pushed, honest, "divergence must raise the surcharge, never lower it");
     }
 
-    /// @notice Regression for an arithmetic reintroduction of the off-switch. The
-    ///         multiplier result is a uint256 clamped into a uint128 escrow. Clamping
-    ///         only to the notional (itself a uint256) and casting would truncate for
-    ///         large swaps, and truncating a value just above 2^128 yields a NEAR-ZERO
-    ///         surcharge — the exact outcome the curve exists to make unreachable.
-    ///         Saturating at uint128 max is what keeps the claim true at every size.
-    function test_LargeNotionalDoesNotTruncateSurchargeToZero() public {
+    /// @notice Regression for an arithmetic reintroduction of the off-switch, pinned at
+    ///         the uint128 boundary where it actually lives.
+    ///
+    ///         The multiplier produces a uint256 that is stored in a uint128 escrow.
+    ///         Clamping only to the notional — itself a uint256 — and casting would
+    ///         truncate modulo 2^128, and a value just above 2^128 truncates to
+    ///         NEAR-ZERO. That is the off-switch, reachable by making the swap large
+    ///         instead of pushing the reference.
+    ///
+    ///         This is a unit test rather than a swap because the boundary is
+    ///         unreachable through the harness: triggering it needs a notional above
+    ///         ~3.4e39, some sixteen orders of magnitude past the test token supply. An
+    ///         integration-level version of this test passes whether or not the
+    ///         saturation exists, which makes it worse than no test at all.
+    function test_ClampSaturatesAtUint128RatherThanTruncating() public pure {
+        uint256 justOver = uint256(type(uint128).max) + 1;
+
+        // Notional is larger than the uint128 ceiling, so only the cast can bound it.
+        assertEq(
+            DivergenceMath.clampToEscrow(justOver, type(uint256).max),
+            type(uint128).max,
+            "must saturate at uint128 max, not wrap to ~zero"
+        );
+        assertGt(
+            DivergenceMath.clampToEscrow(justOver, type(uint256).max), 0,
+            "the off-switch must not be reachable through the cast"
+        );
+    }
+
+    function test_ClampRespectsNotionalWhenItBindsFirst() public pure {
+        assertEq(DivergenceMath.clampToEscrow(1000, 400), 400, "notional binds");
+        assertEq(DivergenceMath.clampToEscrow(300,  400), 300, "neither binds");
+    }
+
+    /// @notice Whatever the inputs, the escrow never exceeds the swapper's input and
+    ///         never wraps. The two ceilings, stated as one property.
+    function testFuzz_ClampNeverExceedsEitherCeiling(uint256 scaled, uint256 notional)
+        public
+        pure
+    {
+        uint128 got = DivergenceMath.clampToEscrow(scaled, notional);
+        assertLe(uint256(got), notional, "escrow cannot exceed the swapper's input");
+        assertLe(uint256(got), scaled,   "clamping cannot INCREASE the surcharge");
+    }
+
+    /// @notice The same claim end to end, at a notional the harness can actually reach.
+    ///         Weaker than the unit test above and kept only as the integration echo.
+    function test_LargeClosingSwapAtMaxMultiplierStillSurcharges() public {
         _swap(ROHAN, false, -500_000e18);
         uint256 idx = hook.openGapIdx(poolId);
         require(idx != 0, "precondition: gap must open");
