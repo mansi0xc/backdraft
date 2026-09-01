@@ -68,6 +68,12 @@ abstract contract BackdraftTestBase is Test {
     uint16 public divSlopeBps      = 0;
     uint16 public maxDivMultBps    = 10_000;
 
+    // Fee flip. Default OFF (sentinel) and a static-fee pool, so every pre-existing test
+    // keeps its measured fee expectations. FeeFlip.t.sol overrides all three in setUp().
+    uint24 public poolFee          = FEE;
+    uint24 public baseFee          = FEE;
+    uint24 public narrowingFee     = type(uint24).max;   // NO_FEE_OVERRIDE
+
     // -------------------------------------------------------------------------
     // setUp
     // -------------------------------------------------------------------------
@@ -129,13 +135,25 @@ abstract contract BackdraftTestBase is Test {
         poolKey = PoolKey({
             currency0:   Currency.wrap(address(token0)),
             currency1:   Currency.wrap(address(token1)),
-            fee:         FEE,
+            fee:         poolFee,
             tickSpacing: TICK_SPACING,
             hooks:       IHooks(address(hook))
         });
         poolId = poolKey.toId();
 
         // 7. Register pool config with hook (before initialize so afterInitialize can validate)
+        _setPoolCfg();
+
+        // 8. Initialize the pool (triggers afterInitialize on the hook)
+        manager.initialize(poolKey, INIT_SQRT_PRICE);
+
+        // 9. Seed the oracle at tick 0 (pool starts at tick 0, so no gap initially)
+        oracle.setRef(poolId, 0);
+    }
+
+    /// @dev Push the current public config fields into the hook. Called once from
+    ///      setUp, and again by tests that change a field mid-run.
+    function _setPoolCfg() internal {
         hook.setPoolCfg(poolId, BackdraftHook.PoolCfg({
             fastPool:          address(0), // not used — oracle is mocked
             deepPool:          address(0),
@@ -147,17 +165,13 @@ abstract contract BackdraftTestBase is Test {
             captureRateBps:    captureRateBps,
             surchargeCapBps:   surchargeCapBps,
             traderShareBps:    traderShareBps,
+            baseFee:           baseFee,
+            narrowingFee:      narrowingFee,
             minAgeBlocks:      minAgeBlocks,
             expiryBlocks:      expiryBlocks,
             sweepGraceBlocks:  sweepGraceBlocks,
             invertTicks:       false
         }));
-
-        // 8. Initialize the pool (triggers afterInitialize on the hook)
-        manager.initialize(poolKey, INIT_SQRT_PRICE);
-
-        // 9. Seed the oracle at tick 0 (pool starts at tick 0, so no gap initially)
-        oracle.setRef(poolId, 0);
     }
 
     // -------------------------------------------------------------------------
