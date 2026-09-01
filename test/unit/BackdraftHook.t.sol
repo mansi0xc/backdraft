@@ -169,21 +169,52 @@ contract SpikeTest is BackdraftTestBase {
     }
 
     // ----------------------------------------------------------
-    // Reference price manipulation detection (fork-style, mocked)
+    // Unreadable reference (hard failure, not manipulation)
     // ----------------------------------------------------------
 
-    /// @notice Simulates fast pool manipulation: oracle returns frozen.
-    ///         Hook must treat this as frozen — no surcharge, no gap.
-    function test_ManipulatedFastPool_OracleReturnsFrozen() public {
+    /// @notice A reference that cannot be read at all must produce inaction: no gap
+    ///         opens, no surcharge is taken, and the swap still succeeds.
+    ///
+    ///         This test used to be named ManipulatedFastPool_OracleReturnsFrozen and
+    ///         described manipulation as the cause. That claim is now false, and the
+    ///         test only passed because it drives the mock's freeze flag directly
+    ///         rather than producing divergence. Appendix §10 measured a boolean freeze
+    ///         on source disagreement as an off-switch reachable for $7-$21, so
+    ///         divergence is PRICED instead — see GraduatedFee.t.sol, in particular
+    ///         test_DivergencePastOldFreezePointStillSurcharges, which asserts the
+    ///         opposite of what this test's old name implied.
+    ///
+    ///         What remains genuinely frozen is a reference the hook cannot read:
+    ///         an unconfigured pool, or observe() reverting for insufficient
+    ///         observation cardinality. Neither is attacker-inducible.
+    function test_UnreadableReferenceProducesInaction() public {
         _addLiquidity(address(this), -6000, 6000, 10_000_000e18);
 
-        // Attacker pushes fast pool tick far from deep pool — oracle guard fires
+        // Hard read failure — NOT manipulation. See SplitV3Reference: the only
+        // remaining ok=false paths are an unconfigured pool and an observe() revert.
         oracle.setFrozen(poolId, true);
 
         // Even with a large swap the hook does nothing
         _swap(ROHAN, false, -500_000e18);
 
-        assertEq(hook.openGapIdx(poolId), 0, "manipulation detected => hook frozen");
+        assertEq(hook.openGapIdx(poolId), 0, "unreadable reference => no gap opens");
+    }
+
+    /// @notice The complement, and the reason the rename matters: divergence that the
+    ///         OLD design would have frozen on now opens a gap and surcharges the
+    ///         close. Without this, the suite would still read as though manipulation
+    ///         disables the hook.
+    function test_ManipulationLevelDivergenceDoesNotDisableTheHook() public {
+        _addLiquidity(address(this), -6000, 6000, 10_000_000e18);
+
+        // Past the old guardMaxDevTicks of 50 — the exact condition that used to
+        // return ok=false and stop all capture for ~$21.
+        oracle.setDivergence(poolId, 51);
+
+        _swap(ROHAN, false, -500_000e18);
+
+        assertGt(hook.openGapIdx(poolId), 0,
+            "divergence past the old freeze point must NOT disable gap detection");
     }
 
     // ----------------------------------------------------------
