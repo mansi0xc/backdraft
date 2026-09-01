@@ -109,16 +109,24 @@ contract DeployHook is Script {
 
         console2.log("");
         console2.log("=== REQUIRED before this hook does anything ===");
-        console2.log("1. refOracle.setConfig(poolId, {fastPool, deepPool, 1800, 50, invertTicks})");
+        console2.log("1. refOracle.setConfig(poolId, {fastPool, deepPool, 1800, 50, 250, invertTicks})");
+        console2.log("   fields: twapWindow, guardMaxDevTicks, freezeMaxDevTicks, invertTicks");
+        console2.log("   guardMaxDevTicks (50) is where the divergence surcharge curve starts,");
+        console2.log("   NOT a freeze point. freezeMaxDevTicks (250) is the absurdity backstop;");
+        console2.log("   set it to 0 to disable freezing on divergence entirely (appendix 10).");
         console2.log("   fastPool:", net.fastPool);
         console2.log("   deepPool:", net.deepPool);
         console2.log("   invertTicks: true if the v3 pair's token order differs from the v4 pool's");
         console2.log("2. hook.setPoolCfg(poolId, {...}) -- afterInitialize reverts without it");
+        console2.log("   divSlopeBps / maxDivMultBps drive the divergence curve. Leaving");
+        console2.log("   divSlopeBps at 0 keeps the multiplier at 1.00x, which restores the");
+        console2.log("   pre-appendix-10 behaviour of not pricing reference manipulation.");
         console2.log("3. hook.setRouterAllowed(universalRouter, true) and positionManager");
         console2.log("   WITHOUT THIS no end user is ever credited: attribution falls back");
         console2.log("   to router addresses. Swaps still work and are still surcharged,");
         console2.log("   so this failure is silent.");
         console2.log("4. require(refOracle.isReady(poolId)) -- false means the deep pool needs");
-        console2.log("   increaseObservationCardinalityNext() or the hook only ever freezes.");
+        console2.log("   increaseObservationCardinalityNext(). observe() failure is now the");
+        console2.log("   MAIN remaining freeze condition, since divergence no longer freezes.");
     }
 }

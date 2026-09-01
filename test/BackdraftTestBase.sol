@@ -62,6 +62,12 @@ abstract contract BackdraftTestBase is Test {
     uint32 public expiryBlocks     = 1000;
     uint24 public gapThresholdTicks = 65;
 
+    // Divergence curve (appendix §10 — replaces the boolean freeze on source
+    // disagreement). Default is neutral at 1.00x so every pre-existing test keeps its
+    // measured expectations; GraduatedFee.t.sol overrides these before setUp().
+    uint16 public divSlopeBps      = 0;
+    uint16 public maxDivMultBps    = 10_000;
+
     // -------------------------------------------------------------------------
     // setUp
     // -------------------------------------------------------------------------
@@ -135,6 +141,8 @@ abstract contract BackdraftTestBase is Test {
             deepPool:          address(0),
             twapWindow:        1800,
             guardMaxDevTicks:  50,
+            divSlopeBps:       divSlopeBps,
+            maxDivMultBps:     maxDivMultBps,
             gapThresholdTicks: gapThresholdTicks,
             captureRateBps:    captureRateBps,
             surchargeCapBps:   surchargeCapBps,

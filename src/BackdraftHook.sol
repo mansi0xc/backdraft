@@ -19,6 +19,7 @@ import {SafeCast}        from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {IReferencePrice}   from "./interfaces/IReferencePrice.sol";
 import {GapMath}           from "./libraries/GapMath.sol";
 import {SurchargeMath}     from "./libraries/SurchargeMath.sol";
+import {DivergenceMath}    from "./libraries/DivergenceMath.sol";
 import {EligibilityLib}    from "./libraries/EligibilityLib.sol";
 
 /// @title BackdraftHook
@@ -46,7 +47,9 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         address fastPool;           // v3 0.01% — reference price
         address deepPool;           // v3 0.05% — manipulation guard
         uint32  twapWindow;         // 1800 seconds
-        uint24  guardMaxDevTicks;   // 50
+        uint24  guardMaxDevTicks;   // 50 — divergence tolerated at 1.00x surcharge
+        uint16  divSlopeBps;        // multiplier bps added per tick of excess divergence
+        uint16  maxDivMultBps;      // ceiling on the divergence multiplier (>= 10_000)
         uint24  gapThresholdTicks;  // 65 — from measured p100 of 57.97 bps
         uint16  captureRateBps;     // sweep parameter
         uint16  surchargeCapBps;    // hard ceiling
@@ -335,7 +338,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         PoolId id = key.toId();
         PoolCfg storage c = cfg[id];
 
-        (int24 refTick, bool ok) = referenceOracle.getRefTick(id);
+        (int24 refTick, bool ok, uint24 divTicks) = referenceOracle.getRefTick(id);
         if (!ok) {
             // Invalidate the cache: afterSwap must not attribute this swap using
             // direction data from a previous one.
@@ -440,6 +443,41 @@ contract BackdraftHook is IHooks, IUnlockCallback {
             c.captureRateBps,
             c.surchargeCapBps
         );
+
+        // Reference-source disagreement is PRICED, not switched on. Appendix §10: the
+        // previous design froze the hook above guardMaxDevTicks, and freezing means zero
+        // surcharge on every gap of every size — an off-switch anyone could reach for a
+        // measured $7-$21 by pushing the thin fast pool one tick past the tolerance. No
+        // value of that tolerance closed both the freeze route and the masking route.
+        //
+        // The curve removes the state to aim at. Each extra tick of manipulation raises
+        // the cost of the very arbitrage the manipulator is protecting, monotonically,
+        // with no discontinuity. The multiplier is applied AFTER surchargeCapBps so the
+        // ceiling itself rises with divergence: a cap applied last would neutralise the
+        // deterrent exactly when it is needed, handing back a rate-limited off-switch.
+        uint256 multBps =
+            DivergenceMath.multiplierBps(divTicks, c.guardMaxDevTicks, c.divSlopeBps, c.maxDivMultBps);
+        if (multBps > DivergenceMath.ONE && surcharge != 0) {
+            uint256 scaled = FullMath.mulDiv(uint256(surcharge), multBps, DivergenceMath.ONE);
+
+            // Two independent ceilings, and BOTH are required.
+            //
+            // `notional`: the escrow is taken out of the swapper's input, so it can
+            // never exceed it.
+            //
+            // `type(uint128).max`: `notional` is a uint256 and a large enough swap
+            // exceeds uint128. Clamping only to `notional` and casting would let the
+            // cast truncate silently — and truncation of a value just above 2^128
+            // yields a NEAR-ZERO surcharge, which is precisely the off-switch this
+            // whole change exists to remove, reintroduced through an arithmetic edge.
+            // Saturate rather than revert: reverting a swap is not an available answer
+            // on this path (see the freeze-not-revert principle in SplitV3Reference).
+            uint256 maxTake = notional < type(uint128).max ? notional : type(uint128).max;
+            if (scaled > maxTake) scaled = maxTake;
+
+            surcharge = uint128(scaled);
+        }
+
         if (surcharge == 0) return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
 
         // Escrow is ALWAYS taken in the input currency, for both swap types. This is
