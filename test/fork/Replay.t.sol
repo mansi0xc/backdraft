@@ -52,17 +52,19 @@ contract ReplayForkTest is Test {
         ref.setConfig(id, SplitV3Reference.Config({
             fastPool:         FAST_POOL,
             deepPool:         DEEP_POOL,
-            twapWindow:       1800,
-            guardMaxDevTicks: 50,
-            invertTicks:      false
+            twapWindow:        1800,
+            guardMaxDevTicks:  50,
+            freezeMaxDevTicks: 250,
+            invertTicks:       false
         }));
 
         uint256 gasBefore = gasleft();
-        (int24 tick, bool ok) = ref.getRefTick(id);
+        (int24 tick, bool ok, uint24 divTicks) = ref.getRefTick(id);
         uint256 gasUsed = gasBefore - gasleft();
 
         emit log_named_uint("reference() gas", gasUsed);
         emit log_named_int("refTick", tick);
         emit log_named_string("ok", ok ? "true" : "false");
+        emit log_named_uint("divTicks", divTicks);
     }
 }

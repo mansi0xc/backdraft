@@ -43,9 +43,18 @@ contract OwnPoolEmaReference is IReferencePrice {
         s.lastBlock = uint48(block.number);
     }
 
-    function getRefTick(PoolId id) external view override returns (int24 refTick, bool ok) {
+    /// @dev Single-source by construction: there is no second source to disagree with,
+    ///      so divTicks is always 0 and the caller's divergence curve stays at 1.00x.
+    ///      This reference is retained only as the measured-and-rejected baseline
+    ///      (appendix §5); a pool cannot detect its own staleness from its own history.
+    function getRefTick(PoolId id)
+        external
+        view
+        override
+        returns (int24 refTick, bool ok, uint24 divTicks)
+    {
         EmaState storage s = state[id];
-        if (s.lastBlock == 0) return (0, false);
-        return (s.ema, true);
+        if (s.lastBlock == 0) return (0, false, 0);
+        return (s.ema, true, 0);
     }
 }

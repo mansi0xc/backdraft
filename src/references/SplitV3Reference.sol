@@ -5,16 +5,26 @@ import {PoolId} from "v4-core/types/PoolId.sol";
 import {IReferencePrice} from "../interfaces/IReferencePrice.sol";
 import {IUniswapV3PoolMinimal} from "../interfaces/IUniswapV3PoolMinimal.sol";
 
-/// @notice External v3 reference price with two-tier guard.
+/// @notice External v3 reference price that REPORTS source disagreement rather than
+///         switching itself off on it.
 ///
 /// Reference:  v3 0.01% spot tick   — freshest, most-frequently-corrected
 /// Guard:      v3 0.05% spot vs TWAP — deepest, hardest to push
 ///
-/// Freeze conditions (returns ok=false — caller must treat as no-op):
-///   1. |deepSpot − deepTwap| > guardMaxDevTicks  → deep source being manipulated
-///   2. |fastSpot − deepSpot| > guardMaxDevTicks  → fast source being manipulated
+/// divTicks = max(|deepSpot − deepTwap|, |fastSpot − deepSpot|)
 ///
-/// See idea.md §4 for the measurement rationale and §4.4 for design.
+/// The caller prices divTicks through DivergenceMath: below guardMaxDevTicks the
+/// surcharge is unchanged, above it the surcharge climbs. Appendix §10 measured the
+/// previous design — freeze on divergence — as an off-switch reachable for $7–$21, and
+/// showed no tolerance value closes both the freeze route and the masking route.
+///
+/// Freeze survives only for failures an attacker cannot induce and the caller cannot
+/// price around (returns ok=false — caller must treat as no-op):
+///   1. Pool unconfigured
+///   2. observe() unavailable (insufficient observation cardinality)
+///   3. divTicks > freezeMaxDevTicks, when that backstop is enabled — see below
+///
+/// See idea.md §4 for the measurement rationale, §4.4 for design, §10 for the attack.
 contract SplitV3Reference is IReferencePrice {
     // -------------------------------------------------------------------------
     // Config (immutable per deployment — pool pairs are fixed)
@@ -24,7 +34,16 @@ contract SplitV3Reference is IReferencePrice {
         address fastPool;         // v3 0.01% — reference tick source
         address deepPool;         // v3 0.05% — manipulation guard
         uint32  twapWindow;       // guard TWAP window in seconds (1800)
-        uint24  guardMaxDevTicks; // freeze threshold (50 ticks → ~6.6% freeze rate calm)
+        uint24  guardMaxDevTicks; // disagreement tolerated at 1.00x surcharge (50)
+        uint24  freezeMaxDevTicks;// absurdity backstop; 0 disables freezing entirely.
+                                  // This is a bounded off-switch, not an eliminated one:
+                                  // §10's argument applies to ANY freeze condition, so
+                                  // set it far above guardMaxDevTicks (recommended 5x)
+                                  // where the reference is not merely pushed but
+                                  // nonsensical, and accept that reaching it costs the
+                                  // attacker roughly that multiple of the $21 baseline.
+                                  // Truncated-oracle reference smoothing is the real fix
+                                  // and is documented, not implemented.
         bool    invertTicks;      // true when v3 token0/token1 order differs from v4
     }
 
@@ -47,6 +66,12 @@ contract SplitV3Reference is IReferencePrice {
     function setConfig(PoolId id, Config calldata cfg) external onlyOwner {
         require(cfg.fastPool != address(0) && cfg.deepPool != address(0), "zero addr");
         require(cfg.twapWindow >= 60, "twap too short");
+        // A backstop at or below the 1.00x tolerance would freeze before the curve ever
+        // engages, restoring the cheap off-switch the curve exists to remove.
+        require(
+            cfg.freezeMaxDevTicks == 0 || cfg.freezeMaxDevTicks > cfg.guardMaxDevTicks,
+            "freeze <= guard"
+        );
         configs[id] = cfg;
     }
 
@@ -54,9 +79,14 @@ contract SplitV3Reference is IReferencePrice {
     // IReferencePrice
     // -------------------------------------------------------------------------
 
-    function getRefTick(PoolId id) external view override returns (int24 refTick, bool ok) {
+    function getRefTick(PoolId id)
+        external
+        view
+        override
+        returns (int24 refTick, bool ok, uint24 divTicks)
+    {
         Config storage c = configs[id];
-        if (c.fastPool == address(0)) return (0, false);
+        if (c.fastPool == address(0)) return (0, false, 0);
 
         int24 fast = _spotTick(c.fastPool);
         int24 deep = _spotTick(c.deepPool);
@@ -68,12 +98,23 @@ contract SplitV3Reference is IReferencePrice {
         // should produce inaction, not a wrong charge." A reverted swap is not inaction.
         // Any failure to read the guard therefore freezes rather than reverts.
         (int24 deepTwap, bool twapOk) = _twapTick(c.deepPool, c.twapWindow);
-        if (!twapOk) return (0, false);
+        if (!twapOk) return (0, false, 0);
 
-        // Guard 1: deep source itself is being manipulated
-        if (_abs(deep - deepTwap) > c.guardMaxDevTicks) return (0, false);
-        // Guard 2: fast source diverges from agreed-upon deep price
-        if (_abs(fast - deep)     > c.guardMaxDevTicks) return (0, false);
+        // Signal 1: deep source diverging from its own TWAP — the deep pool is moving
+        // faster than its own history, i.e. it is being pushed.
+        uint24 dDeep = _abs(deep - deepTwap);
+        // Signal 2: fast source diverging from the deep price the two agree on.
+        uint24 dFast = _abs(fast - deep);
+        // The worst of the two: either source misbehaving makes the reference suspect,
+        // and taking the max means an attacker cannot hide by splitting the push.
+        divTicks = dDeep > dFast ? dDeep : dFast;
+
+        // Neither subtraction can overflow int24: v3 ticks are bounded by ±887272, so
+        // the widest possible difference is 1_774_544, inside int24 and inside uint24.
+
+        if (c.freezeMaxDevTicks != 0 && divTicks > c.freezeMaxDevTicks) {
+            return (0, false, divTicks);
+        }
 
         refTick = c.invertTicks ? -fast : fast;
         ok = true;

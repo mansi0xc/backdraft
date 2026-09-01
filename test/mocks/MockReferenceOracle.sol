@@ -9,6 +9,7 @@ import {IReferencePrice} from "../../src/interfaces/IReferencePrice.sol";
 contract MockReferenceOracle is IReferencePrice {
     mapping(PoolId => int24) public refTicks;
     mapping(PoolId => bool) public frozen;
+    mapping(PoolId => uint24) public divergence;
 
     function setRef(PoolId id, int24 tick) external {
         refTicks[id] = tick;
@@ -18,8 +19,18 @@ contract MockReferenceOracle is IReferencePrice {
         frozen[id] = isFrozen;
     }
 
-    function getRefTick(PoolId id) external view override returns (int24 refTick, bool ok) {
-        if (frozen[id]) return (0, false);
-        return (refTicks[id], true);
+    /// @notice Simulate reference-source disagreement without freezing.
+    function setDivergence(PoolId id, uint24 divTicks) external {
+        divergence[id] = divTicks;
+    }
+
+    function getRefTick(PoolId id)
+        external
+        view
+        override
+        returns (int24 refTick, bool ok, uint24 divTicks)
+    {
+        if (frozen[id]) return (0, false, divergence[id]);
+        return (refTicks[id], true, divergence[id]);
     }
 }

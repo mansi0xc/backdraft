@@ -13,12 +13,14 @@ import {Hooks}            from "v4-core/libraries/Hooks.sol";
 import {Hooks}           from "v4-core/libraries/Hooks.sol";
 import {StateLibrary}    from "v4-core/libraries/StateLibrary.sol";
 import {FullMath}        from "v4-core/libraries/FullMath.sol";
+import {LPFeeLibrary}    from "v4-core/libraries/LPFeeLibrary.sol";
 import {FixedPoint96}    from "v4-core/libraries/FixedPoint96.sol";
 import {SafeCast}        from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 import {IReferencePrice}   from "./interfaces/IReferencePrice.sol";
 import {GapMath}           from "./libraries/GapMath.sol";
 import {SurchargeMath}     from "./libraries/SurchargeMath.sol";
+import {DivergenceMath}    from "./libraries/DivergenceMath.sol";
 import {EligibilityLib}    from "./libraries/EligibilityLib.sol";
 
 /// @title BackdraftHook
@@ -46,11 +48,18 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         address fastPool;           // v3 0.01% — reference price
         address deepPool;           // v3 0.05% — manipulation guard
         uint32  twapWindow;         // 1800 seconds
-        uint24  guardMaxDevTicks;   // 50
+        uint24  guardMaxDevTicks;   // 50 — divergence tolerated at 1.00x surcharge
+        uint16  divSlopeBps;        // multiplier bps added per tick of excess divergence
+        uint16  maxDivMultBps;      // ceiling on the divergence multiplier (>= 10_000)
         uint24  gapThresholdTicks;  // 65 — from measured p100 of 57.97 bps
         uint16  captureRateBps;     // sweep parameter
         uint16  surchargeCapBps;    // hard ceiling
         uint16  traderShareBps;     // alpha
+        uint24  baseFee;            // dynamic-fee pools initialise to 0; this is the
+                                    // normal fee, applied in afterInitialize. Units are
+                                    // v4 fee units (hundredths of a bip): 3000 = 0.30%.
+        uint24  narrowingFee;       // fee charged to GAP-CLOSING swaps while a gap is
+                                    // open. NO_FEE_OVERRIDE disables the flip entirely.
         uint32  minAgeBlocks;
         uint32  expiryBlocks;
         uint32  sweepGraceBlocks;   // delay after expiry before unclaimed funds return to LPs
@@ -209,6 +218,11 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         });
     }
 
+    /// @notice Sentinel for PoolCfg.narrowingFee: no override, pool fee applies to all
+    ///         swaps. Distinguishable from a legitimate zero fee, which is a real
+    ///         configuration (waive the LP fee entirely for correcting flow).
+    uint24 internal constant NO_FEE_OVERRIDE = type(uint24).max;
+
     // =========================================================================
     // Admin
     // =========================================================================
@@ -221,6 +235,21 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     }
 
     function setPoolCfg(PoolId id, PoolCfg calldata c) external onlyOwner {
+        // A fee above MAX_LP_FEE is rejected by v4 at swap time, which would revert every
+        // narrowing swap in the pool rather than failing here where it can be seen.
+        require(
+            c.narrowingFee == NO_FEE_OVERRIDE || c.narrowingFee <= LPFeeLibrary.MAX_LP_FEE,
+            "narrowingFee > max"
+        );
+        require(c.baseFee <= LPFeeLibrary.MAX_LP_FEE, "baseFee > max");
+        // The flip is funded by the surcharge taken from the same swap. A discount is
+        // only coherent if it is a discount: charging correcting flow MORE than the
+        // pool's normal fee inverts the mechanism into a second tax on the arbitrage
+        // that fixes the price.
+        require(
+            c.narrowingFee == NO_FEE_OVERRIDE || c.narrowingFee <= c.baseFee,
+            "narrowingFee > baseFee"
+        );
         cfg[id] = c;
     }
 
@@ -260,6 +289,14 @@ contract BackdraftHook is IHooks, IUnlockCallback {
             lpPaid: 0, traderPaid: 0,
             maxAbsGap: 0, gapPositive: false, isCurrency0: false, settled: true, swept: true
         }));
+
+        // A dynamic-fee pool initialises with an LP fee of ZERO (LPFeeLibrary
+        // .getInitialLPFee). Without this the pool would trade fee-free until someone
+        // called updateDynamicLPFee, and the fee flip would be a discount off nothing.
+        if (LPFeeLibrary.isDynamicFee(key.fee)) {
+            poolManager.updateDynamicLPFee(key, cfg[id].baseFee);
+        }
+
         return IHooks.afterInitialize.selector;
     }
 
@@ -321,6 +358,43 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         return IHooks.beforeRemoveLiquidity.selector;
     }
 
+    /// @notice The LP fee to return from beforeSwap for a gap-CLOSING swap.
+    ///
+    /// @dev Returns 0 (no override, pool fee applies) unless the flip is configured AND
+    ///      the pool is a dynamic-fee pool. The second condition is not defensive
+    ///      politeness: v4 reverts the swap if a static-fee pool's hook returns an
+    ///      override, so returning one unconditionally would brick every narrowing swap
+    ///      in any statically-priced pool the hook is attached to.
+    ///
+    ///      Why the discount exists at all. The surcharge alone makes this pool a worse
+    ///      venue for the flow that fixes its price: an arbitrageur's break-even widens,
+    ///      so the equilibrium gap sits WIDER here than in a vanilla pool, and capture is
+    ///      funded by degrading the very thing it measures. The flip inverts that. A swap
+    ///      that closes the gap pays a reduced LP fee, funded by the surcharge collected
+    ///      from the swaps that opened it, which makes this the cheapest venue in
+    ///      existence for corrective flow while widening flow still pays full freight.
+    ///
+    ///      The net arithmetic, which must stay true and is asserted in FeeFlip.t.sol:
+    ///
+    ///          closer  pays  surcharge − (baseFee − narrowingFee)  >  0
+    ///          widener pays  baseFee, no surcharge
+    ///
+    ///      Closing a gap is still MORE expensive than widening one. The discount reduces
+    ///      the penalty on correction; it does not pay anyone to correct. setPoolCfg
+    ///      enforces narrowingFee <= baseFee so the discount cannot become a surcharge,
+    ///      but the surcharge side depends on gap and notional and cannot be bounded
+    ///      statically — a captureRateBps low enough relative to the fee discount would
+    ///      make correcting flow net-cheaper than not trading. Sweep for it.
+    function _narrowingFeeOverride(uint24 poolFee, uint24 narrowingFee)
+        internal
+        pure
+        returns (uint24)
+    {
+        if (narrowingFee == NO_FEE_OVERRIDE) return 0;
+        if (!LPFeeLibrary.isDynamicFee(poolFee)) return 0;
+        return narrowingFee | LPFeeLibrary.OVERRIDE_FEE_FLAG;
+    }
+
     // =========================================================================
     // IHooks — beforeSwap
     // =========================================================================
@@ -335,7 +409,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         PoolId id = key.toId();
         PoolCfg storage c = cfg[id];
 
-        (int24 refTick, bool ok) = referenceOracle.getRefTick(id);
+        (int24 refTick, bool ok, uint24 divTicks) = referenceOracle.getRefTick(id);
         if (!ok) {
             // Invalidate the cache: afterSwap must not attribute this swap using
             // direction data from a previous one.
@@ -440,7 +514,41 @@ contract BackdraftHook is IHooks, IUnlockCallback {
             c.captureRateBps,
             c.surchargeCapBps
         );
-        if (surcharge == 0) return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+
+        // Reference-source disagreement is PRICED, not switched on. Appendix §10: the
+        // previous design froze the hook above guardMaxDevTicks, and freezing means zero
+        // surcharge on every gap of every size — an off-switch anyone could reach for a
+        // measured $7-$21 by pushing the thin fast pool one tick past the tolerance. No
+        // value of that tolerance closed both the freeze route and the masking route.
+        //
+        // The curve removes the state to aim at. Each extra tick of manipulation raises
+        // the cost of the very arbitrage the manipulator is protecting, monotonically,
+        // with no discontinuity. The multiplier is applied AFTER surchargeCapBps so the
+        // ceiling itself rises with divergence: a cap applied last would neutralise the
+        // deterrent exactly when it is needed, handing back a rate-limited off-switch.
+        uint256 multBps =
+            DivergenceMath.multiplierBps(divTicks, c.guardMaxDevTicks, c.divSlopeBps, c.maxDivMultBps);
+        if (multBps > DivergenceMath.ONE && surcharge != 0) {
+            uint256 scaled = FullMath.mulDiv(uint256(surcharge), multBps, DivergenceMath.ONE);
+
+            // Two ceilings, both load-bearing: the swapper's input, and the uint128 the
+            // escrow is stored in. See DivergenceMath.clampToEscrow — the second one is
+            // what stops a large enough swap from truncating the surcharge to near-zero
+            // and handing back the off-switch through an arithmetic edge.
+            surcharge = DivergenceMath.clampToEscrow(scaled, notional);
+        }
+
+        // The discount is a property of DIRECTION, not of surcharge size. A narrowing
+        // swap whose surcharge rounds to zero is still corrective flow and still gets
+        // the cheaper fee; withholding it here would make the incentive fire only on
+        // large gaps, which is exactly where correction already pays for itself.
+        if (surcharge == 0) {
+            return (
+                IHooks.beforeSwap.selector,
+                BeforeSwapDeltaLibrary.ZERO_DELTA,
+                _narrowingFeeOverride(key.fee, c.narrowingFee)
+            );
+        }
 
         // Escrow is ALWAYS taken in the input currency, for both swap types. This is
         // what preserves the one-currency-per-gap invariant: for exact input the input
@@ -464,9 +572,15 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         // Positive delta => hook is owed => taken from the swapper.
         // Exact input:  the input currency is SPECIFIED   -> (surcharge, 0)
         // Exact output: the input currency is UNSPECIFIED -> (0, surcharge)
+        // Third slot: the LP fee override. Every OTHER return path in this function
+        // returns 0 there — a widener, a swap with no gap open, and a frozen reference
+        // all pay the pool's normal fee. Only a swap that closes an open gap is
+        // discounted, and it is the same swap paying the surcharge.
+        uint24 feeOverride = _narrowingFeeOverride(key.fee, c.narrowingFee);
+
         return exactInput
-            ? (IHooks.beforeSwap.selector, toBeforeSwapDelta(int128(surcharge), 0), 0)
-            : (IHooks.beforeSwap.selector, toBeforeSwapDelta(0, int128(surcharge)), 0);
+            ? (IHooks.beforeSwap.selector, toBeforeSwapDelta(int128(surcharge), 0), feeOverride)
+            : (IHooks.beforeSwap.selector, toBeforeSwapDelta(0, int128(surcharge)), feeOverride);
     }
 
     // =========================================================================
