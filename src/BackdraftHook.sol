@@ -169,6 +169,10 @@ contract BackdraftHook is IHooks, IUnlockCallback {
 
     event SweptToLps(PoolId indexed id, uint256 gapIdx, uint256 amount);
     event RouterAllowed(address indexed router, bool allowed);
+    event OwnerProposed(address indexed currentOwner, address indexed proposedOwner);
+    event OwnerTransferred(address indexed previousOwner, address indexed newOwner);
+    event PoolCfgSet(PoolId indexed id, PoolCfg cfg);
+    event ReferenceOracleSet(address indexed previousOracle, address indexed newOracle);
     event UnattributedAction(PoolId indexed id, address indexed router);
 
     event GapOpened(PoolId indexed id, uint256 gapIdx, int24 refTick, uint48 openBlock);
@@ -191,7 +195,10 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         // getHookPermissions(). Without this a mis-mined CREATE2 salt yields a hook that
         // silently never receives beforeSwap — discovered live, not in tests.
         Hooks.validateHookPermissions(this, getHookPermissions());
+
+        require(_owner != address(0), "owner is zero");
         owner = _owner;
+        emit OwnerTransferred(address(0), _owner);
     }
 
     // =========================================================================
@@ -228,9 +235,33 @@ contract BackdraftHook is IHooks, IUnlockCallback {
 
     address public owner;
 
+    /// @notice Proposed next owner. Set by proposeOwner, cleared by acceptOwner.
+    /// @dev Two-step because a single-step transfer to a mistyped or unreachable
+    ///      address is unrecoverable, and this owner is not cosmetic: it can
+    ///      repoint the reference oracle, which decides where every gap opens.
+    address public pendingOwner;
+
     modifier onlyOwner() {
         require(msg.sender == owner, "not owner");
         _;
+    }
+
+    /// @notice Nominate the next owner. Nothing changes until they accept.
+    ///         Pass address(0) to cancel an outstanding proposal.
+    function proposeOwner(address newOwner) external onlyOwner {
+        require(newOwner != owner, "already owner");
+        pendingOwner = newOwner;
+        emit OwnerProposed(owner, newOwner);
+    }
+
+    /// @notice Accept a pending nomination. Only the nominated address can call it,
+    ///         which is what proves the new owner controls the key.
+    function acceptOwner() external {
+        require(msg.sender == pendingOwner, "not pending owner");
+        address previous = owner;
+        owner = pendingOwner;
+        pendingOwner = address(0);
+        emit OwnerTransferred(previous, owner);
     }
 
     function setPoolCfg(PoolId id, PoolCfg calldata c) external onlyOwner {
@@ -250,6 +281,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
             "narrowingFee > baseFee"
         );
         cfg[id] = c;
+        emit PoolCfgSet(id, c);
     }
 
     /// @notice Allow or disallow a router's hookData as a source of user identity.
@@ -261,8 +293,15 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         emit RouterAllowed(router, allowed);
     }
 
+    /// @notice Repoint the reference source. This is the most consequential admin
+    ///         action in the contract — the oracle decides where gaps open and how
+    ///         large they are — so it is logged, and the zero address is refused
+    ///         because it would make every swap take the frozen path silently.
     function setReferenceOracle(IReferencePrice oracle) external onlyOwner {
+        require(address(oracle) != address(0), "oracle is zero");
+        address previous = address(referenceOracle);
         referenceOracle = oracle;
+        emit ReferenceOracleSet(previous, address(oracle));
     }
 
     // =========================================================================

@@ -48,15 +48,44 @@ contract SplitV3Reference is IReferencePrice {
     }
 
     mapping(PoolId => Config) public configs;
-    address public immutable owner;
+    address public owner;
 
+    /// @notice Proposed next owner. Set by proposeOwner, cleared by acceptOwner.
+    address public pendingOwner;
+
+    event OwnerProposed(address indexed currentOwner, address indexed proposedOwner);
+    event OwnerTransferred(address indexed previousOwner, address indexed newOwner);
+    event ConfigSet(PoolId indexed id, Config cfg);
+
+    /// @dev `owner` was immutable. That is stricter than it looks: it means a lost or
+    ///      compromised deployer key can never be rotated, and this owner sets the
+    ///      pool addresses the reference is read from. Mutable with a two-step
+    ///      handover is the weaker-looking option that actually fails safe.
     constructor(address _owner) {
+        require(_owner != address(0), "owner is zero");
         owner = _owner;
+        emit OwnerTransferred(address(0), _owner);
     }
 
     modifier onlyOwner() {
         require(msg.sender == owner, "not owner");
         _;
+    }
+
+    /// @notice Nominate the next owner. Nothing changes until they accept.
+    function proposeOwner(address newOwner) external onlyOwner {
+        require(newOwner != owner, "already owner");
+        pendingOwner = newOwner;
+        emit OwnerProposed(owner, newOwner);
+    }
+
+    /// @notice Accept a pending nomination. Only the nominee can call it.
+    function acceptOwner() external {
+        require(msg.sender == pendingOwner, "not pending owner");
+        address previous = owner;
+        owner = pendingOwner;
+        pendingOwner = address(0);
+        emit OwnerTransferred(previous, owner);
     }
 
     // -------------------------------------------------------------------------
@@ -73,6 +102,7 @@ contract SplitV3Reference is IReferencePrice {
             "freeze <= guard"
         );
         configs[id] = cfg;
+        emit ConfigSet(id, cfg);
     }
 
     // -------------------------------------------------------------------------
