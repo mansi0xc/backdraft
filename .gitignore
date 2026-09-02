@@ -6,6 +6,18 @@
 # Env
 .env
 
+# OS
+.DS_Store
+
+# Agent tooling — not part of the submission
+.agents/
+.claude/
+skills-lock.json
+
+# Scratch
+zz/
+zz.zip
+
 # Python (refbench)
 __pycache__/
 *.pyc

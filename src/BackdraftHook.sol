@@ -102,7 +102,6 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     mapping(PoolId => uint256)                       public openGapIdx;   // 0 = none open
     mapping(bytes32 => uint128)                      public contribution; // keccak(poolId,gapIdx,addr)
     mapping(bytes32 => PositionInfo)                 public positions;
-    mapping(address => mapping(Currency => uint256)) public traderClaimable;
     mapping(bytes32 => mapping(uint256 => bool))     public lpClaimed;
 
     // Transient slot: cached |gap| from beforeSwap for afterSwap to read (same tx)
