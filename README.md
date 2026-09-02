@@ -59,10 +59,10 @@ ETHERSCAN_API_KEY=YOUR_KEY
 
 ## Running Tests
 
-189 tests across 23 suites. Everything except the fork suite runs without an RPC.
+205 tests across 24 suites. Everything except the fork suite runs without an RPC.
 
 ```bash
-# Everything that needs no network — 187 tests
+# Everything that needs no network — 203 tests
 forge test --no-match-path "test/fork/*"
 
 # Reference reader against live mainnet v3 pools — 2 tests
@@ -70,6 +70,9 @@ forge test --match-path "test/fork/*" --fork-url $MAINNET_RPC_URL
 
 # Gas table
 forge test --match-contract GasTableTest -vv
+
+# Static analysis — see SECURITY.md for the triage
+forge build --build-info && slither . --ignore-compile --filter-paths "lib/|test/|script/"
 ```
 
 ---
@@ -167,8 +170,11 @@ unconfigured, or `observe()` unavailable.
 swap; a two-stage read (cheap `slot0` first, full TWAP only when a gap is indicated) is
 the obvious optimisation and is **not** implemented.
 
-Gap threshold is 65 ticks, from a measured p100 reference error of ~58 bps across calm
-and volatile regimes.
+Gap threshold is **65 ticks**. It was sized against a measured p100 reference error of
+~58 bps — but that figure came from a reference design that withholds its price on the
+worst blocks, and the shipped path does not. Measured on the shipped path, p100 is
+228.65 bps. The threshold covers p95 with wide margin and the tail with none. See
+[Measurement](#the-shipped-path-measured-and-what-it-says-about-the-threshold).
 
 ---
 
@@ -185,13 +191,20 @@ and volatile regimes.
   whole life, so a swap closing a small residual pays the peak rate. Bounded by
   `surchargeCapBps`. Charging on ticks actually closed by each swap is the fix and is
   not implemented.
+- **Gap masking costs $22k–$54k of arbitrage notional and therefore pays.** Pushing the
+  reference pool below threshold is not deterred by the graduated multiplier, because a
+  successful mask means no gap opens and there is nothing to multiply. Measured, not
+  fixed. See Measurement.
 - **Gap freezing and gap masking are the same attack.** No single divergence tolerance
-  closes both. Graduated pricing bounds the damage rather than removing it; a truncated
-  reference (bounding per-block reference movement) is measured in `updatedAppendix.md`
-  and is documented, not implemented.
+  closes both, and pricing divergence rather than freezing on it made masking cheaper
+  for large gaps. A truncated reference (bounding per-block reference movement) is
+  measured in `updatedAppendix.md` and is documented, not implemented.
 - **LP eligibility is snapshot-based.** Claims read the position's current liquidity and
   `addBlock`, not their values at gap open. Growth accumulators are the correct
   primitive.
+- **The gap threshold does not cover the reference's worst case.** 65 ticks against a
+  measured p100 of 228.65 bps on the shipped path, in ~0.19% of blocks. Bounded by the
+  graduated multiplier and the surcharge cap, not eliminated. See Measurement.
 - **One token pair.** All measurement is ETH/USDC.
 
 ---
@@ -203,8 +216,8 @@ reproducible: **https://github.com/mansi0xc/backdraft-python-scripts**
 (`selftest.py` runs offline; `fetch.py` + `analyze.py` regenerate the tables from an
 archive RPC; raw CSVs and generated outputs are committed).
 
-Ground truth is Binance ETH/USDC. Windows span calm and volatile regimes, including a
-~22% ETH move.
+Ground truth is Binance ETH/USDC across three mainnet windows, spanning daily ranges of
+3.24%, 6.58% and 21.10%.
 
 ### Which source, and why not a blend
 
@@ -237,24 +250,86 @@ tradeoff is why divergence is priced rather than ignored.
 
 | Method | mean (bps) | p95 | max | lag (blocks) | coverage |
 |---|---|---|---|---|---|
+| `shipped_fast_spot_frozen` | 2.69 | 8.55 | 70.97 | 19 | 89.9% |
+| **`shipped_fast_spot_raw`** (ships) | **3.48** | **11.25** | **228.65** | **0** | **100%** |
 | `composite_median_guarded` | 3.50 | 8.15 | 57.97 | 19 | 89.9% |
 | `spot_v3_005` | 4.18 | 9.88 | 228.65 | 0 | 100% |
 | `twap_1800s_v3_005` | 25.18 | 76.94 | 639.0 | 7 | 100% |
 | `own_pool_ema` | 58.23 | 115.52 | 564.01 | 14 | 100% |
 
-`own_pool_ema` is the design we started with, kept as a negative control: an EMA of the
-pool's own price is an order of magnitude worse than any external source, because a pool
-cannot detect its own staleness from its own history.
+Coverage below 100% is not a defect of measurement — it is a design that refuses to
+answer. The two 89.9% rows freeze on divergence; the shipped path never does.
 
-A spot-vs-TWAP guard cuts worst-case error from 228.65 to 57.97 bps — roughly 75% — at
-the cost of 10.06% of blocks frozen. That is the tradeoff the gap threshold is sized
-against: **65 ticks**, above the 57.97 bps worst case.
+`own_pool_ema` is 16x worse than the reference that ships. A pool cannot detect its own
+staleness from its own history, and this is the number that says so.
 
-Provenance caveat, stated because it matters: the 57.97 figure is the max for
-`composite_median_guarded`, which is not what ships. The shipped reference is `v3_001`
-spot with divergence *priced* rather than frozen. The threshold is therefore sized
-against a measured worst case from a neighbouring configuration, not from the shipped
-one. Re-measuring the shipped path is the first thing to do next.
+### The shipped path, measured, and what it says about the threshold
+
+The rows above score candidate designs. `shipped_fast_spot_raw` scores what the contract
+actually does: `v3_001` spot, divergence priced rather than frozen, reference never
+withheld.
+
+Windows are described by the measured daily range of the ground-truth series rather
+than by an adjective, because the adjectives were wrong in an earlier draft and the
+number cannot be:
+
+| window | dates | ETH daily range | mean | p95 | **max** | blocks |
+|---|---|---|---|---|---|---|
+| 25785425–25799780 | Aug 19–21 (48h, 1s truth) | 21.10% | 3.48 | 11.25 | **228.65** | 14,356 |
+| 25527155–25534325 | Jul 14 | 6.58% | 4.15 | 13.13 | **112.14** | 7,166 |
+| 25598870–25606053 | Jul 24 | 3.24% | 2.31 | 6.77 | **42.05** | 7,179 |
+
+Worst-case reference error tracks realised volatility closely across the three, which is
+what you would expect and is worth stating: the tail is a volatility phenomenon, so a
+threshold sized on a quiet window will be wrong on a loud one.
+
+**The 65-tick gap threshold does not cover the worst case of the shipped
+configuration.** It was sized against 57.97 bps — the max of
+`composite_median_guarded`, a design that withholds the reference on divergence and
+therefore never reports its worst blocks. The shipped path never withholds, so its tail
+is intact, and in the volatile window it reaches 228.65 bps: 3.5x the threshold.
+
+How often that matters, same window:
+
+| reference error exceeds | share of blocks |
+|---|---|
+| 65 ticks (the threshold) | 0.188% (27 of 14,356) |
+| 100 ticks | 0.077% |
+| 150 ticks | 0.042% |
+| 200 ticks | 0.007% (1 block) |
+
+So roughly two blocks in a thousand can open a gap that is an artifact of reference
+error rather than a real dislocation, and on the worst of them the artifact is large
+enough to charge near the cap. The graduated divergence multiplier is what stands
+between that and a mischarge — and it is aimed at the right thing, because divergence
+and error peak together — but it is a price on the symptom, not a bound on the error.
+
+This is stated rather than fixed. Raising the threshold to cover p100 would blind the
+hook to most real dislocations; the truncated reference in `updatedAppendix.md` is the
+design that addresses the tail directly, and it is not implemented.
+
+### Divergence, measured
+
+`divTicks` drives the surcharge multiplier and had never been characterised:
+
+| window | ETH daily range | p50 | p95 | p99 | max | blocks over the 50-tick tolerance |
+|---|---|---|---|---|---|---|
+| Aug 19–21 | 21.10% | 13.0 | 78.2 | 247.0 | 642.3 | 10.06% |
+| Jul 14 | 6.58% | 9.2 | 40.7 | 125.6 | 178.9 | 3.89% |
+| Jul 24 | 3.24% | 6.8 | 32.0 | 62.3 | 98.5 | 1.67% |
+
+The multiplier engages on 1.7%–10% of blocks, monotone in realised volatility. Under the
+old boolean guard those were exactly the blocks where the hook went dark — most often
+precisely when dislocations are largest. That is the downtime the graduated curve
+removed, and it is the strongest argument for pricing divergence rather than freezing
+on it.
+
+### Regime coverage, stated honestly
+
+Three windows spanning 6.58%, 3.24% and 21.10% daily range. That is one violent day and
+two ordinary ones; there is no genuinely calm window in the set. Claims of the form
+"holds across calm and volatile regimes" are not supported by this data and are not
+made. A quiet-market window is an outstanding gap, alongside the second token pair.
 
 ### Truncated reference
 
@@ -266,9 +341,47 @@ implemented.
 
 ### Manipulation cost
 
-`manipulation_cost.py` prices the attack this hook is most exposed to: pushing the thin
-0.01% pool to mask a dislocation below threshold. Its output is not committed — run it
-and paste the break-even table before submission.
+The attack this hook is most exposed to: push the thin 0.01% reference pool toward the
+v4 price until the apparent gap falls below threshold. No gap opens, the arbitrageur
+closes the whole dislocation surcharge-free, then unwinds. Measured against 46,344 swap
+events at p10 in-range liquidity — the attacker's best moment — with gas at 10 gwei:
+
+| gap (ticks) | push needed | push notional | attack cost | avoided | break-even arb notional |
+|---|---|---|---|---|---|
+| 66 | 2 | $2,836 | $7 | 3.30 bps | **$22,203** |
+| 100 | 36 | $51,099 | $17 | 5.00 bps | **$33,959** |
+| 200 | 136 | $193,526 | $45 | 10.00 bps | **$45,465** |
+| 400 | 336 | $480,524 | $103 | 20.00 bps | **$51,432** |
+| 600 | 536 | $770,407 | $161 | 30.00 bps | **$53,614** |
+
+**$22k–$54k of arbitrage notional, at every gap size.** That is inside ordinary trade
+size on this pair, so the attack pays. Stating it is the point: the mechanism is
+defensible at the sizes it will actually see, and it is not defended against a
+determined searcher on a thin reference pool.
+
+Pricing divergence made this attack *cheaper*, and that trade should be visible rather
+than buried. Under the old boolean guard, a 50-tick push froze the reference, which
+capped the push at 49 ticks and left break-even flat at $84,386 for every gap above 113.
+The shipped design has no cliff, so the push is limited only by cost — and because a
+full mask means no gap opens, the graduated multiplier has nothing to multiply. The
+deterrent does not bind on the attack it most needs to deter.
+
+| gap | break-even, old boolean guard | break-even, shipped |
+|---|---|---|
+| 114 | $84,386 | $36,770 |
+| 400 | $84,386 | $51,432 |
+
+Removing the freeze closed the gap-freezing attack and widened the gap-masking one.
+They are the same attack from opposite sides. The truncated reference in
+`updatedAppendix.md` is the design that bounds both — a per-block movement cap limits how
+far any push moves the hook's view, however much the attacker spends — and it is measured
+and not implemented.
+
+Full table and unmodelled assumptions: `out/manipulation_cost_25785425_25799780.md` in
+the measurement repo.
 
 `CHANGES.md` — the bug-fix record: nine classes of defect found and fixed across the
 build, each with the test that pins it.
+
+`SECURITY.md` — Slither triage: 15 findings down to 6, with the reason each remaining
+one is a tuple-destructuring false positive rather than a suppressed result.
