@@ -184,9 +184,9 @@ worst blocks, and the shipped path does not. Measured on the shipped path, p100 
   Attribution resolves to the address named in `hookData` when the caller is an
   allowlisted router, and falls back to the router otherwise. `tx.origin` is no longer
   used anywhere. Routers do not attest that the named address is the caller.
-- **Blind below 65 ticks by construction.** Dislocations smaller than the threshold are
-  never captured. The dollar-weighted share of dislocation value in that blind spot is
-  measured, not assumed.
+- **Blind below 65 ticks by construction.** On a thin stand-in pool 0.43% of
+  dislocation value sits in that blind spot; on a busy one, 61%. Measured — see
+  Measurement.
 - **Partial closes are overcharged.** The rate is set from `maxAbsGap` for the gap's
   whole life, so a swap closing a small residual pays the peak rate. Bounded by
   `surchargeCapBps`. Charging on ticks actually closed by each swap is the fix and is
@@ -330,6 +330,52 @@ Three windows spanning 6.58%, 3.24% and 21.10% daily range. That is one violent 
 two ordinary ones; there is no genuinely calm window in the set. Claims of the form
 "holds across calm and volatile regimes" are not supported by this data and are not
 made. A quiet-market window is an outstanding gap, alongside the second token pair.
+
+### Where the value actually is
+
+Block shares do not answer the question that matters, because volatility clusters: the
+blocks the guard would freeze are not a random 10% of blocks. Every swap in a target
+pool is bucketed by what `beforeSwap` would have seen — pre-swap pool tick against the
+0.01% reference at that log position — and weighted by `|gap| x swap notional`, which is
+the surcharge base.
+
+Volatile window, three stand-in target pools:
+
+| target pool | swaps | blind (\|gap\| ≤ 65) | capturable at 1.00x | in divergent blocks |
+|---|---|---|---|---|
+| v3 1.00% (thin) | 114 | 0.43% | 8.83% | **90.73%** |
+| v3 0.30% (mid) | 1,154 | 63.30% | 0.00% | **36.70%** |
+| v3 0.05% (busy) | 14,868 | 60.92% | 0.45% | **38.63%** |
+
+Two findings, and the second is the reason the design changed.
+
+**The blind spot is a function of flow, not of the threshold.** On a thin pool almost
+all dislocation value clears 65 ticks; on a busy pool most of it never does. Backdraft
+is economically meaningful on thin pools of major pairs — a new v4 pool bootstrapping
+against a deep v3 incumbent — and close to irrelevant on a pool that is already the
+price-setter. That is a positioning statement, not a defect, but it should be said out
+loud rather than discovered by a judge.
+
+**A boolean guard would have switched the hook off on 37%–91% of the value it exists to
+capture.** The blocks where spot and TWAP disagree are exactly the blocks where a fast
+exogenous move is happening. Under the old freeze, that value was not merely uncaptured,
+it was invisible. Pricing divergence instead of freezing on it moves the whole of that
+column back into scope, at a raised multiplier:
+
+| target pool | capturable, boolean guard | capturable, shipped |
+|---|---|---|
+| v3 1.00% | 8.83% | **99.57%** |
+| v3 0.30% | 0.00% | **36.70%** |
+| v3 0.05% | 0.45% | **39.08%** |
+
+This is the strongest single argument in the project for pricing divergence, and it was
+computed after the change rather than before it. Appendix §A2 predicted the direction
+and declined to guess the size; the size is an order of magnitude.
+
+Caveats that belong with the number: `n = 114` swaps on the thin pool, so its column is
+indicative and not a finding; the TWAP is a 150-block rolling mean of deep-pool swaps
+rather than a v3 `observe()` result; and these are stand-in pools, not Backdraft pools.
+Script: `bucket_value.py`, output in `out/bucket_value_25785425_25799780.txt`.
 
 ### Truncated reference
 
