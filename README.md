@@ -115,8 +115,9 @@ script/
 cannot detect that pool's own staleness. It is the design we started with, and it is
 kept as the negative control.
 
-Not in this repo: the Python benchmark pipeline (`refbench/`) that produced the numbers
-below, and the raw swap CSVs it reads.
+The measurement pipeline that produced every number below lives in a companion repo,
+with the raw swap CSVs and generated tables committed:
+**https://github.com/mansi0xc/backdraft-python-scripts**
 
 ---
 
@@ -124,7 +125,8 @@ below, and the raw swap CSVs it reads.
 
 The reference is the **v3 0.01% ETH/USDC spot tick** — the most frequently corrected
 source, not the deepest. A weighted blend of several pools adds no accuracy, because a
-weighted median just returns whichever source holds more than half the weight.
+weighted median just returns whichever source holds more than half the weight. Both
+claims are measured, not asserted — see [Measurement](#measurement).
 
 | Pool | Role | Address |
 |---|---|---|
@@ -196,8 +198,77 @@ and volatile regimes.
 
 ## Measurement
 
-`updatedAppendix.md` — truncated-reference study across three mainnet windows: glitch
-rejection, real capture, and phantom cost, with sample sizes stated.
+Every design parameter here came from a measurement, and the measurements are
+reproducible: **https://github.com/mansi0xc/backdraft-python-scripts**
+(`selftest.py` runs offline; `fetch.py` + `analyze.py` regenerate the tables from an
+archive RPC; raw CSVs and generated outputs are committed).
+
+Ground truth is Binance ETH/USDC. Windows span calm and volatile regimes, including a
+~22% ETH move.
+
+### Which source, and why not a blend
+
+Mean absolute error against Binance, per reference source and per combination
+(window 25785425–25799780, 14,356 blocks, 1-second ground truth):
+
+| sources | mean err (bps) | p95 | liquidity share | min weight to corrupt |
+|---|---|---|---|---|
+| `v3_001` | **3.48** | 11.25 | 0.100 | 0.05 |
+| `v3_005` | 4.18 | 9.88 | 0.781 | 0.39 |
+| `v3_030` | 13.82 | 29.21 | 0.117 | 0.06 |
+| `v3_100` | 50.90 | 90.61 | 0.002 | 0.001 |
+| `v3_001+v3_005` | 4.18 | 9.88 | 0.881 | 0.44 |
+| `v3_005+v3_030` | 4.18 | 9.88 | 0.898 | 0.45 |
+| all four | 4.18 | 9.88 | 1.000 | 0.50 |
+
+Two results, both negative, both load-bearing:
+
+**Most-traded beats deepest.** The 0.01% pool is the most accurate single source despite
+holding 10% of the liquidity. Freshness, not depth, is what a reference needs.
+
+**Liquidity-weighted aggregation buys nothing.** Every combination containing `v3_005`
+returns *identical* error — 4.18 / 9.88, to three decimals. A weighted median returns
+whichever source holds more than half the weight, so once the 0.05% pool is in the set
+the blend is that pool. The `min weight to corrupt` column is the price of that
+accuracy: the single best source is also the cheapest to push (0.05 vs 0.39). That
+tradeoff is why divergence is priced rather than ignored.
+
+### Reference error and guard cost
+
+| Method | mean (bps) | p95 | max | lag (blocks) | coverage |
+|---|---|---|---|---|---|
+| `composite_median_guarded` | 3.50 | 8.15 | 57.97 | 19 | 89.9% |
+| `spot_v3_005` | 4.18 | 9.88 | 228.65 | 0 | 100% |
+| `twap_1800s_v3_005` | 25.18 | 76.94 | 639.0 | 7 | 100% |
+| `own_pool_ema` | 58.23 | 115.52 | 564.01 | 14 | 100% |
+
+`own_pool_ema` is the design we started with, kept as a negative control: an EMA of the
+pool's own price is an order of magnitude worse than any external source, because a pool
+cannot detect its own staleness from its own history.
+
+A spot-vs-TWAP guard cuts worst-case error from 228.65 to 57.97 bps — roughly 75% — at
+the cost of 10.06% of blocks frozen. That is the tradeoff the gap threshold is sized
+against: **65 ticks**, above the 57.97 bps worst case.
+
+Provenance caveat, stated because it matters: the 57.97 figure is the max for
+`composite_median_guarded`, which is not what ships. The shipped reference is `v3_001`
+spot with divergence *priced* rather than frozen. The threshold is therefore sized
+against a measured worst case from a neighbouring configuration, not from the shipped
+one. Re-measuring the shipped path is the first thing to do next.
+
+### Truncated reference
+
+`updatedAppendix.md` — a per-swap study across three mainnet windows of bounding how far
+the reference may move per block. Glitch rejection is monotone in the bound and lands at
+0% for the raw reference in all three windows; real capture holds but rests on n = 2
+independent episodes; phantom cost is non-monotone and regime-dependent. Measured, not
+implemented.
+
+### Manipulation cost
+
+`manipulation_cost.py` prices the attack this hook is most exposed to: pushing the thin
+0.01% pool to mask a dislocation below threshold. Its output is not committed — run it
+and paste the break-even table before submission.
 
 `CHANGES.md` — the bug-fix record: nine classes of defect found and fixed across the
 build, each with the test that pins it.
