@@ -596,8 +596,12 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         // side instead would land escrow in the output currency and make a gap closed by
         // a mix of swap types revert on the currency invariant.
         Currency spec = params.zeroForOne ? key.currency0 : key.currency1;
-        poolManager.mint(address(this), spec.toId(), surcharge);
 
+        // Gap bookkeeping happens BEFORE the mint. Re-entry is already impossible —
+        // this runs inside the PoolManager's lock and mint() calls back into nothing —
+        // but ordering the writes first means the currency invariant is checked and
+        // the escrow total is recorded before any external call, so no reachable
+        // interleaving can observe a minted balance the gap does not yet account for.
         if (gp.escrowed == 0) {
             gp.isCurrency0 = params.zeroForOne;
         } else if (gp.isCurrency0 != params.zeroForOne) {
@@ -606,6 +610,8 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         gp.escrowed += surcharge;
 
         emit Surcharged(id, idx, _resolveUser(sender, hookData), surcharge);
+
+        poolManager.mint(address(this), spec.toId(), surcharge);
 
         // Positive delta => hook is owed => taken from the swapper.
         // Exact input:  the input currency is SPECIFIED   -> (surcharge, 0)
@@ -770,10 +776,13 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         if (remainder == 0) return;
 
         Currency cur = g.isCurrency0 ? _currency0[id] : _currency1[id];
+        emit SweptToLps(id, gapIdx, remainder);
+        // unlock() returns the callback's return data, which is empty by construction:
+        // unlockCallback returns "". Nothing to check.
+        // slither-disable-next-line unused-return
         poolManager.unlock(abi.encode(PayoutData({
             currency: cur, to: address(0), amount: remainder, isDonate: true, key: _poolKeys[id]
         })));
-        emit SweptToLps(id, gapIdx, remainder);
     }
 
     function claimTrader(PoolId id, uint256 gapIdx) external {
@@ -791,8 +800,8 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         if (owed > remaining) owed = remaining;
         g.traderPaid += uint128(owed);
 
-        _payout(id, g, msg.sender, owed);
         emit TraderClaimed(id, gapIdx, msg.sender, owed);
+        _payout(id, g, msg.sender, owed);
     }
 
     /// @notice Claim an LP's share of a settled gap's escrow.
@@ -842,8 +851,13 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         g.lpPaid += uint128(owed);
 
         lpClaimed[positionKey][gapIdx] = true;
-        _payout(id, g, msg.sender, owed);
+        // Emitted before the payout, not after. The PoolManager's own lock makes
+        // re-entry impossible here, so this is ordering hygiene rather than a fix:
+        // an observer reconstructing state from logs sees the credit recorded before
+        // the transfer that satisfies it, which is the order the storage writes
+        // actually happened in.
         emit LpClaimed(id, gapIdx, positionKey, owed);
+        _payout(id, g, msg.sender, owed);
     }
 
     // =========================================================================
@@ -949,6 +963,13 @@ contract BackdraftHook is IHooks, IUnlockCallback {
             // donate() credits in-range liquidity directly, so unclaimed LP capture goes
             // back to LPs — no treasury, no owner discretion, nothing to trust.
             bool zero = Currency.unwrap(p.currency) == Currency.unwrap(p.key.currency0);
+            // donate() returns the delta it created. We do not read it because the
+            // burn above already produced the offsetting negative delta for exactly
+            // p.amount, and the PoolManager reverts on unlock if the two do not sum
+            // to zero — the settlement check is stronger than any assertion we could
+            // write here. donate reverts outright if the pool has no in-range
+            // liquidity, which is the case where the remainder has nowhere to go.
+            // slither-disable-next-line unused-return
             poolManager.donate(p.key, zero ? p.amount : 0, zero ? 0 : p.amount, "");
         } else {
             poolManager.take(p.currency, p.to, p.amount);
@@ -960,6 +981,8 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         if (amount == 0) return;
         Currency cur = g.isCurrency0 ? _currency0[id] : _currency1[id];
         // burn+take require an unlock context; claim functions are called outside swaps.
+        // unlock() returns unlockCallback's return data, which is "" by construction.
+        // slither-disable-next-line unused-return
         poolManager.unlock(abi.encode(PayoutData({
             currency: cur, to: to, amount: amount, isDonate: false, key: _poolKeys[id]
         })));
