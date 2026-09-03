@@ -59,9 +59,9 @@ ETHERSCAN_API_KEY=YOUR_KEY
 
 ## Running Tests
 
-217 tests across 26 suites. Everything except the fork suite runs without an RPC.
-The two fork tests and the eight sweep/gas-table tests print measurements and have no
-assertions; the other 202 do.
+223 tests across 26 suites. Everything except the fork suite runs without an RPC.
+The eight sweep/gas-table tests print measurements and have no assertions; every other
+test asserts, including the fork suite.
 
 ```bash
 # Everything that needs no network — 215 tests
@@ -105,6 +105,11 @@ test/
   splitting/     splitting a close across many swaps must not discount it
   liquidity/     LpEligibility, PayoutCap
   lifecycle/     expiry, sign flip, auto-settle
+  fork/          Replay — the reference reader against the live mainnet v3 pools it
+                 names. Every other suite runs on a mock oracle, which proves the hook
+                 behaves correctly GIVEN a reference and nothing about whether the
+                 reader produces one. These recompute the reader's output from the raw
+                 pool calls and assert equality.
   security/      RouterAuth (identity forwarding), ClaimAuth, Ownership,
                  ReviewRegressions (external review 2026-09-03, six findings)
   fees/          FeeFlip (dynamic-fee override)
