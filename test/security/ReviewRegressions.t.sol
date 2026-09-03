@@ -261,6 +261,45 @@ contract ReviewRegressionsTest is BackdraftTestBase {
         assertEq(uint256(g.eligibleLiqAtOpen), 10_000_000e18, "grief nets to zero");
     }
 
+    // ------------------------------------------------------------------ paging
+
+    /// @notice `gaps()` returns the whole array and grows without bound. The paged
+    ///         accessors are what a client should use; these pin their edge cases.
+    function test_GapPagingMatchesTheFullArray() public {
+        _addLiquidity(LP_A, -6000, 6000, 10_000_000e18);
+        vm.roll(block.number + minAgeBlocks + 1);
+        for (uint256 i; i < 3; i++) {
+            vm.roll(block.number + expiryBlocks + 1);
+            oracle.setRef(poolId, _poolTick());
+            _cycle(ROHAN, VIK);
+        }
+
+        uint256 n = hook.gapCount(poolId);
+        assertEq(n, hook.gaps(poolId).length, "gapCount matches");
+        assertGt(n, 3, "precondition: several gaps");
+
+        BackdraftHook.Gap[] memory all = hook.gaps(poolId);
+        BackdraftHook.Gap[] memory page = hook.gapsPaged(poolId, 1, 2);
+        assertEq(page.length, 2);
+        assertEq(page[0].openBlock, all[1].openBlock);
+        assertEq(page[1].openBlock, all[2].openBlock);
+
+        // Clipping, not reverting, at the end.
+        BackdraftHook.Gap[] memory tail = hook.gapsPaged(poolId, n - 1, 50);
+        assertEq(tail.length, 1);
+        assertEq(tail[0].openBlock, all[n - 1].openBlock);
+
+        assertEq(hook.gapsPaged(poolId, n, 10).length, 0, "past the end is empty");
+        assertEq(hook.gapsPaged(poolId, 0, 0).length, 0, "zero limit is empty");
+
+        BackdraftHook.Gap[] memory recent = hook.recentGaps(poolId, 2);
+        assertEq(recent.length, 2);
+        assertEq(recent[1].openBlock, all[n - 1].openBlock, "newest last");
+
+        BackdraftHook.Gap[] memory over = hook.recentGaps(poolId, 500);
+        assertEq(over.length, n, "asking for more than exists returns everything");
+    }
+
     // ------------------------------------------------------------------ R7
 
     /// @notice The reference crosses the pool while a gap is open, with no swap. The

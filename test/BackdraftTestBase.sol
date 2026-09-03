@@ -155,9 +155,6 @@ abstract contract BackdraftTestBase is Test {
     ///      setUp, and again by tests that change a field mid-run.
     function _setPoolCfg() internal {
         hook.setPoolCfg(poolId, BackdraftHook.PoolCfg({
-            fastPool:          address(0), // not used — oracle is mocked
-            deepPool:          address(0),
-            twapWindow:        1800,
             guardMaxDevTicks:  50,
             divSlopeBps:       divSlopeBps,
             maxDivMultBps:     maxDivMultBps,
@@ -169,8 +166,7 @@ abstract contract BackdraftTestBase is Test {
             narrowingFee:      narrowingFee,
             minAgeBlocks:      minAgeBlocks,
             expiryBlocks:      expiryBlocks,
-            sweepGraceBlocks:  sweepGraceBlocks,
-            invertTicks:       false
+            sweepGraceBlocks:  sweepGraceBlocks
         }));
     }
 

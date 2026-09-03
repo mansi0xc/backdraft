@@ -44,10 +44,13 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     // State structs
     // =========================================================================
 
+    /// @dev The reference SOURCES are not configured here. `fastPool`, `deepPool`,
+    ///      `twapWindow` and `invertTicks` live on the IReferencePrice implementation
+    ///      (see SplitV3Reference.Config) and were duplicated here, unread, until the
+    ///      2026-09-03 review: four fields that made the hook look like it read v3 pools
+    ///      directly, and one of them — `invertTicks` — silently did nothing when set.
+    ///      The hook configures only what the hook uses.
     struct PoolCfg {
-        address fastPool;           // v3 0.01% — reference price
-        address deepPool;           // v3 0.05% — manipulation guard
-        uint32  twapWindow;         // 1800 seconds
         uint24  guardMaxDevTicks;   // 50 — divergence tolerated at 1.00x surcharge
         uint16  divSlopeBps;        // multiplier bps added per tick of excess divergence
         uint16  maxDivMultBps;      // ceiling on the divergence multiplier (>= 10_000)
@@ -62,8 +65,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
                                     // open. NO_FEE_OVERRIDE disables the flip entirely.
         uint32  minAgeBlocks;
         uint32  expiryBlocks;
-        uint32  sweepGraceBlocks;   // delay after expiry before unclaimed funds return to LPs
-        bool    invertTicks;        // true if v3 and v4 ordering differ
+        uint32  sweepGraceBlocks;   // delay after expiry before a gap's remainder is carried
     }
 
     struct Gap {
@@ -1186,6 +1188,39 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         return _positionKey(id, lpOwner, tickLower, tickUpper, salt);
     }
 
+    /// @notice Number of gap records, including the index-0 sentinel.
+    function gapCount(PoolId id) external view returns (uint256) {
+        return _gaps[id].length;
+    }
+
+    /// @notice A window of gap records: `[offset, offset + limit)`, clipped to the end.
+    /// @dev    Prefer this over `gaps()` from any client. `gaps()` returns the whole
+    ///         array, which grows without bound over a pool's life and will eventually
+    ///         exceed an RPC's response or gas cap — a frontend built on it works in
+    ///         testing and dies once the pool has real history.
+    function gapsPaged(PoolId id, uint256 offset, uint256 limit)
+        external
+        view
+        returns (Gap[] memory page)
+    {
+        Gap[] storage all = _gaps[id];
+        if (offset >= all.length) return new Gap[](0);
+        uint256 end = offset + limit;
+        if (end > all.length) end = all.length;
+        page = new Gap[](end - offset);
+        for (uint256 i = offset; i < end; i++) page[i - offset] = all[i];
+    }
+
+    /// @notice The most recent `n` gaps, newest last. What a UI actually wants.
+    function recentGaps(PoolId id, uint256 n) external view returns (Gap[] memory page) {
+        Gap[] storage all = _gaps[id];
+        uint256 start = all.length > n ? all.length - n : 0;
+        page = new Gap[](all.length - start);
+        for (uint256 i = start; i < all.length; i++) page[i - start] = all[i];
+    }
+
+    /// @dev The whole array. Unbounded: see gapsPaged. Kept because the test suite and
+    ///      the invariant ghost read it, where the length is known small.
     function gaps(PoolId id) external view returns (Gap[] memory) {
         return _gaps[id];
     }

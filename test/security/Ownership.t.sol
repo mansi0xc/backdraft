@@ -228,9 +228,6 @@ contract OwnershipTest is BackdraftTestBase {
 
     function _defaultCfg() internal view returns (BackdraftHook.PoolCfg memory) {
         return BackdraftHook.PoolCfg({
-            fastPool:          address(0xf00d),
-            deepPool:          address(0xbeef),
-            twapWindow:        1800,
             guardMaxDevTicks:  50,
             divSlopeBps:       100,
             maxDivMultBps:     20_000,
@@ -242,8 +239,7 @@ contract OwnershipTest is BackdraftTestBase {
             narrowingFee:      1000,
             minAgeBlocks:      minAgeBlocks,
             expiryBlocks:      expiryBlocks,
-            sweepGraceBlocks:  sweepGraceBlocks,
-            invertTicks:       false
+            sweepGraceBlocks:  sweepGraceBlocks
         });
     }
 }

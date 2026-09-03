@@ -59,12 +59,13 @@ ETHERSCAN_API_KEY=YOUR_KEY
 
 ## Running Tests
 
-223 tests across 26 suites. Everything except the fork suite runs without an RPC.
-The eight sweep/gas-table tests print measurements and have no assertions; every other
-test asserts, including the fork suite.
+226 tests across 26 suites. Everything except the fork suite runs without an RPC.
+Every test asserts. The gas table and the parameter sweep print their tables and then
+check them: gas against per-path ceilings measured relative to a hookless control pool,
+the sweep against the monotonicity its parameters are supposed to have.
 
 ```bash
-# Everything that needs no network — 215 tests
+# Everything that needs no network — 218 tests
 forge test --no-match-path "test/fork/*"
 
 # Reference reader against live mainnet v3 pools — 2 tests
@@ -115,7 +116,9 @@ test/
   fees/          FeeFlip (dynamic-fee override)
   invariant/     Solvency — hook balance ≥ outstanding obligations
   integration/   EndToEnd
-  sweep/         ParamSweep, gas table
+  sweep/         ParamSweep (parameter grid + monotonicity), GasTable (per-path gas
+                 ceilings, each swap measured against the identical swap on a hookless
+                 control pool in the same PoolManager)
   fork/          Replay — reference reader against live mainnet pools
 
 script/
@@ -172,6 +175,34 @@ unconfigured, or `observe()` unavailable.
 | fast−deep | 2 ticks |
 | deep spot−TWAP | 21 ticks |
 | `getRefTick` gas | 74,307 |
+
+### Gas
+
+Measured against a control pool with no hook, same PoolManager, same tokens. The raw
+per-swap figure is the whole round trip — test router, PoolManager, hook — so quoting it
+as the hook's cost overstates it roughly threefold. Ceilings are asserted in
+`GasTableTest`; a change that doubles a path fails the suite instead of scrolling past
+in a log.
+
+| path | total | control | hook |
+|---|---|---|---|
+| swap, no gap open | 249,987 | 146,370 | **+103,617** |
+| swap, opens a gap | 384,100 | 146,518 | **+237,582** |
+| swap, surcharged | 361,822 | — | — |
+| `addLiquidity` | 476,863 | 223,208 | **+253,655** |
+| `settle()` | 50,765 | — | — |
+| `claimTrader()` | 106,798 | — | — |
+| `claimLp()` | 116,789 | — | — |
+
+Two things worth stating plainly. The common path — a swap when nothing is dislocated —
+costs about 104k over a plain pool, and that is what most traders pay. The largest
+overhead in the system is not on traders at all: `addLiquidity` roughly doubles, because
+the hook writes a position record and an eligibility checkpoint, both cold. LPs pay the
+heaviest gas cost of a mechanism that exists to pay LPs.
+
+`settle()` is 50,765, not the ~20,000 an earlier version of this table reported. That
+measurement timed a gap the swap path had already settled, so it was timing an early
+return.
 | `observe()` cardinality | 723 slots — sufficient |
 
 `observe()` accounts for ~58k of the 74k. The read is currently unconditional on every
