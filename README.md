@@ -59,13 +59,13 @@ ETHERSCAN_API_KEY=YOUR_KEY
 
 ## Running Tests
 
-226 tests across 26 suites. Everything except the fork suite runs without an RPC.
+236 tests across 27 suites. Everything except the fork suite runs without an RPC.
 Every test asserts. The gas table and the parameter sweep print their tables and then
 check them: gas against per-path ceilings measured relative to a hookless control pool,
 the sweep against the monotonicity its parameters are supposed to have.
 
 ```bash
-# Everything that needs no network — 218 tests
+# Everything that needs no network — 228 tests
 forge test --no-match-path "test/fork/*"
 
 # Reference reader against live mainnet v3 pools — 2 tests
@@ -113,7 +113,9 @@ test/
                  pool calls and assert equality.
   security/      RouterAuth (identity forwarding), ClaimAuth, Ownership,
                  ReviewRegressions (external review 2026-09-03, six findings)
-  fees/          FeeFlip (dynamic-fee override)
+  fees/          FeeFlipMath (the discount bound, asserted directly — the swap-level
+                 tests below cannot see whether an override was returned, only what the
+                 pool charged), FeeFlip (dynamic-fee override)
   invariant/     Solvency — hook balance ≥ outstanding obligations
   integration/   EndToEnd
   sweep/         ParamSweep (parameter grid + monotonicity), GasTable (per-path gas
@@ -186,16 +188,19 @@ in a log.
 
 | path | total | control | hook |
 |---|---|---|---|
-| swap, no gap open | 249,987 | 146,370 | **+103,617** |
-| swap, opens a gap | 384,100 | 146,518 | **+237,582** |
-| swap, surcharged | 361,822 | — | — |
-| `addLiquidity` | 476,863 | 223,208 | **+253,655** |
+| swap, no gap open | 227,825 | 146,370 | **+81,455** |
+| swap, opens a gap | 361,908 | 146,518 | **+215,390** |
+| swap, surcharged | 339,000 | — | — |
+| `addLiquidity` | 476,867 | 223,208 | **+253,659** |
 | `settle()` | 50,765 | — | — |
 | `claimTrader()` | 106,798 | — | — |
 | `claimLp()` | 116,789 | — | — |
 
+The per-swap scratch that `beforeSwap` hands to `afterSwap` lives in transient storage;
+as a warm `SSTORE` it cost ~22k more per swap.
+
 Two things worth stating plainly. The common path — a swap when nothing is dislocated —
-costs about 104k over a plain pool, and that is what most traders pay. The largest
+costs about 81k over a plain pool, and that is what most traders pay. The largest
 overhead in the system is not on traders at all: `addLiquidity` roughly doubles, because
 the hook writes a position record and an eligibility checkpoint, both cold. LPs pay the
 heaviest gas cost of a mechanism that exists to pay LPs.
@@ -483,9 +488,9 @@ and not implemented.
 Full table and unmodelled assumptions: `out/manipulation_cost_25785425_25799780.md` in
 the measurement repo.
 
-`CHANGES.md` — the build log. The bug-fix record is the test suite itself: every
-patch directory (`exactout/`, `splitting/`, `lifecycle/`, `security/`, …) opens with
-the defect it pins and the measurement that found it.
+The bug-fix record is the test suite itself: every patch directory (`exactout/`,
+`splitting/`, `lifecycle/`, `security/`, …) opens with the defect it pins and the
+measurement that found it.
 
 ### External review, 2026-09-03
 

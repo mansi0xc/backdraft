@@ -5,6 +5,7 @@ libs = ["lib"]
 test = "test"
 script = "script"
 solc = "0.8.26"
+evm_version = "cancun"   # tstore/tload for the per-swap cache; v4 PoolManager requires it anyway
 optimizer = true
 optimizer_runs = 1_000_000
 via_ir = true

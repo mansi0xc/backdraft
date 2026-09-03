@@ -24,7 +24,8 @@ import {IUniswapV3PoolMinimal} from "../interfaces/IUniswapV3PoolMinimal.sol";
 ///   2. observe() unavailable (insufficient observation cardinality)
 ///   3. divTicks > freezeMaxDevTicks, when that backstop is enabled — see below
 ///
-/// See idea.md §4 for the measurement rationale, §4.4 for design, §10 for the attack.
+/// See the README (Reference price, Measurement) for the rationale and the measured
+/// error, and APPENDIX.md for the manipulation-cost analysis.
 contract SplitV3Reference is IReferencePrice {
     // -------------------------------------------------------------------------
     // Config (immutable per deployment — pool pairs are fixed)

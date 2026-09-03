@@ -20,6 +20,7 @@ import {SafeCast}        from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {IReferencePrice}   from "./interfaces/IReferencePrice.sol";
 import {GapMath}           from "./libraries/GapMath.sol";
 import {SurchargeMath}     from "./libraries/SurchargeMath.sol";
+import {FeeFlipMath}       from "./libraries/FeeFlipMath.sol";
 import {DivergenceMath}    from "./libraries/DivergenceMath.sol";
 import {EligibilityLib}    from "./libraries/EligibilityLib.sol";
 
@@ -27,7 +28,7 @@ import {EligibilityLib}    from "./libraries/EligibilityLib.sol";
 /// @notice Prices the mispricing a swap leaves behind and returns the captured value
 ///         to the traders who created it and the LPs who funded it.
 ///
-/// Mechanism (see idea.md for full design):
+/// Mechanism (see the README for the full design):
 ///   - Contribution ledger: tracks which addresses widened the gap and by how much
 ///   - Surcharge: closing swaps pay proportional to gap size and notional
 ///   - Settlement: escrowed value split between traders (α) and LPs (1-α),
@@ -108,10 +109,11 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     mapping(bytes32 => PositionInfo)                 public positions;
     mapping(bytes32 => mapping(uint256 => bool))     public lpClaimed;
 
-    // Per-swap scratch. This is exactly the shape transient storage is for (written and
-    // read within one transaction), but solc 0.8.26 has no `transient` keyword for
-    // structs, so it is regular storage: one warm SSTORE per swap. Moving it to
-    // tstore/tload via assembly is a straightforward gas win that is not done.
+    // Per-swap scratch, in TRANSIENT storage. Written by beforeSwap and read by
+    // afterSwap within the same transaction and never needed after it, which is exactly
+    // what tstore is for: 100 gas a write against 2,900 for the warm SSTORE this used to
+    // be, and no dirty-slot refund accounting. solc 0.8.26 has no `transient` keyword
+    // for structs, so the five fields are packed into one word by hand.
     /// @dev Per-swap scratch written by beforeSwap and read by afterSwap.
     ///      Packs into one slot (uint24 + 2 bools). `wasNarrowing` is the swap's
     ///      direction relative to the gap AT ENTRY — the only honest basis for
@@ -135,7 +137,37 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         bool   valid;
     }
 
-    mapping(PoolId => SwapCache) private _swapCache;
+    /// @dev Transient slot derivation seed. Per-pool, because one transaction can swap
+    ///      several pools through the same hook and each needs its own scratch.
+    uint256 private constant _SWAP_CACHE_SEED =
+        uint256(keccak256("backdraft.swapCache.v1")) - 1;
+
+    function _swapCacheSlot(PoolId id) private pure returns (bytes32) {
+        return keccak256(abi.encode(id, _SWAP_CACHE_SEED));
+    }
+
+    /// @dev Layout: [0..23] absGapBefore | [24..47] refTick (int24 two's complement)
+    ///              | [48] wasNarrowing | [49] gapPositiveBefore | [50] valid
+    function _writeSwapCache(PoolId id, SwapCache memory sc) private {
+        uint256 packed = uint256(sc.absGapBefore)
+            | (uint256(uint24(sc.refTick)) << 24)
+            | (sc.wasNarrowing      ? uint256(1) << 48 : 0)
+            | (sc.gapPositiveBefore ? uint256(1) << 49 : 0)
+            | (sc.valid             ? uint256(1) << 50 : 0);
+        bytes32 slot = _swapCacheSlot(id);
+        assembly ("memory-safe") { tstore(slot, packed) }
+    }
+
+    function _readSwapCache(PoolId id) private view returns (SwapCache memory sc) {
+        bytes32 slot = _swapCacheSlot(id);
+        uint256 packed;
+        assembly ("memory-safe") { packed := tload(slot) }
+        sc.absGapBefore      = uint24(packed);
+        sc.refTick           = int24(uint24(packed >> 24));
+        sc.wasNarrowing      = (packed >> 48) & 1 == 1;
+        sc.gapPositiveBefore = (packed >> 49) & 1 == 1;
+        sc.valid             = (packed >> 50) & 1 == 1;
+    }
 
     /// @notice Routers whose hookData is trusted to name the end user.
     /// @dev    In v4 the `sender` argument to a hook callback is the ROUTER, never the
@@ -461,39 +493,14 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     ///      but the surcharge side depends on gap and notional and cannot be bounded
     ///      statically — a captureRateBps low enough relative to the fee discount would
     ///      make correcting flow net-cheaper than not trading. Sweep for it.
-    ///      R4 (review 2026-09-03): the inequality above was asserted only where the
-    ///      surcharge cap binds. At a 100-tick gap and captureRateBps = 500 the surcharge
-    ///      is 5 bps and a 3000 -> 500 discount is 25 bps, so a closer paid ~10 bps all-in
-    ///      against a widener's 30, and on the pure LVR path LPs were net WORSE off than
-    ///      in a vanilla pool. The discount is now bounded by the surcharge taken from the
-    ///      same swap: the LP fee is reduced by at most the surcharge rate, so
-    ///
-    ///          closer pays  >=  baseFee   at every gap size, with equality when the
-    ///                                     surcharge is smaller than the full discount.
-    ///
-    ///      At small gaps the discount exactly rebates the surcharge and the closer pays
-    ///      what a vanilla pool would charge; the LP fee foregone reappears in escrow,
-    ///      where it is split by the ledger. At large gaps the full discount applies and
-    ///      the surcharge still dominates. Closing is never cheaper than widening.
+    ///      The bound and its derivation live in FeeFlipMath, which is unit-tested
+    ///      directly; a hook subclass cannot be deployed at an arbitrary address
+    ///      (Hooks.validateHookAddress), so the library is the only place the guard can
+    ///      be asserted on rather than inferred from a swap's resulting fee.
     function _narrowingFeeOverride(
         uint24 poolFee, uint24 baseFee, uint24 narrowingFee, uint256 surcharge, uint256 notional
     ) internal pure returns (uint24) {
-        if (narrowingFee == NO_FEE_OVERRIDE) return 0;
-        if (!LPFeeLibrary.isDynamicFee(poolFee)) return 0;
-
-        // The pool charges its LP fee on what reaches it, which is notional minus the
-        // surcharge the hook already took. For "closer pays >= baseFee on the full
-        // notional" to hold exactly:
-        //
-        //     s + (n - s)(b - d) >= n*b   <=>   d <= s(1 - b) / (n - s)
-        //
-        // in v4 fee units (1e6 = 100%). mulDiv floors, so the bound is never exceeded.
-        if (surcharge == 0 || surcharge >= notional) return 0;
-        uint256 discountCap  = FullMath.mulDiv(surcharge, 1e6 - uint256(baseFee), notional - surcharge);
-        uint256 fullDiscount = uint256(baseFee) - uint256(narrowingFee);
-        uint256 discount     = discountCap < fullDiscount ? discountCap : fullDiscount;
-        uint24  fee           = uint24(uint256(baseFee) - discount);
-        return fee | LPFeeLibrary.OVERRIDE_FEE_FLAG;
+        return FeeFlipMath.narrowingFeeOverride(poolFee, baseFee, narrowingFee, surcharge, notional);
     }
 
     // =========================================================================
@@ -514,10 +521,10 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         if (!ok) {
             // Invalidate the cache: afterSwap must not attribute this swap using
             // direction data from a previous one.
-            _swapCache[id] = SwapCache({
+            _writeSwapCache(id, SwapCache({
                 absGapBefore: 0, refTick: 0, wasNarrowing: false,
                 gapPositiveBefore: false, valid: false
-            });
+            }));
             return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
         }
 
@@ -528,13 +535,13 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         // Computed before every early return below: a swap that is not surcharged
         // (exact-output, no open gap) can still be a legitimate widener.
         bool narrowing = GapMath.isNarrowing(gapBefore, params.zeroForOne);
-        _swapCache[id] = SwapCache({
+        _writeSwapCache(id, SwapCache({
             absGapBefore:      GapMath.abs(gapBefore),
             refTick:           refTick,
             wasNarrowing:      narrowing,
             gapPositiveBefore: gapBefore > 0,
             valid:             true
-        });
+        }));
 
         uint256 idx = openGapIdx[id];
 
@@ -620,7 +627,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         //
         // Trade-off, stated rather than hidden: a swap arriving when the gap is nearly
         // closed still pays the peak rate. That is the partial-close overcharge already
-        // documented in idea.md §6, slightly enlarged and still bounded by surchargeCapBps.
+        // documented in the README, slightly enlarged and still bounded by surchargeCapBps.
         Gap storage gp = _gaps[id][idx];
         uint128 surcharge = SurchargeMath.compute(
             notional,
@@ -724,7 +731,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         // calls. PoolManager always invokes beforeSwap immediately before the swap and
         // afterSwap immediately after, in the same transaction, so the cache is fresh by
         // construction. An invalid cache means beforeSwap froze; afterSwap must too.
-        SwapCache memory sc = _swapCache[id];
+        SwapCache memory sc = _readSwapCache(id);
         if (!sc.valid) return (IHooks.afterSwap.selector, 0);
         int24 refTick = sc.refTick;
 

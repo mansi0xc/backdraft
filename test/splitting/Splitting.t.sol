@@ -17,7 +17,7 @@ import {console}           from "forge-std/console.sol";
 //   ONE swap    escrowed: 3840
 //   EIGHT swaps escrowed: 1380      -> 36% of the single-swap charge
 //
-// A 64% discount for a two-line change to a searcher's bundle. idea.md §3.2 asserted
+// A 64% discount for a two-line change to a searcher's bundle. The design asserted
 // the opposite as settled fact and the planned test_SplittingGivesNoDiscount was never
 // written.
 //
@@ -35,7 +35,7 @@ import {console}           from "forge-std/console.sol";
 // granularity: the gap shuts when |gap| falls to gapThresholdTicks, and finer legs
 // cross that band precisely, leaving the remainder to trade uncharged, while a coarse
 // final leg is charged in full as it crosses. The residual is therefore bounded by the
-// sub-threshold band the hook is deliberately blind to (idea.md §4.5) and floors around
+// sub-threshold band the hook is deliberately blind to and floors around
 // 90%. Was 36% before the fix.
 // ============================================================
 contract SplittingTest is BackdraftTestBase {

@@ -300,6 +300,11 @@ contract SolvencyTest is StdInvariant, Test {
     }
 
     /// @notice Paid never exceeds pot, per gap: lpPaid <= lpPot and traderPaid <= traderPot.
+    /// @dev    lpPot is `escrowed - traderPot + lpCarry`. The carry term is not optional:
+    ///         a gap that inherited a swept remainder pays its LPs more than its own
+    ///         escrow, by design. Omitting it here reported a legitimate claim as an
+    ///         overpayment (only on seeds that happened to sweep, then open a
+    ///         same-currency gap, then claim it).
     function invariant_paidNeverExceedsPot() public view {
         BackdraftHook h = handler.hook();
         PoolId id = handler.poolId();
@@ -307,12 +312,12 @@ contract SolvencyTest is StdInvariant, Test {
         uint16 share = handler.traderShareBps();
         for (uint256 i = 1; i < gaps.length; i++) {
             BackdraftHook.Gap memory g = gaps[i];
-            if (g.escrowed == 0) continue;
+            if (g.escrowed == 0 && g.lpCarry == 0) continue;
             uint256 explained = g.totalContribution > g.maxAbsGap ? g.maxAbsGap : g.totalContribution;
             uint256 tp = g.maxAbsGap == 0 ? 0
                 : (uint256(g.escrowed) * share * explained) / (uint256(g.maxAbsGap) * 10_000);
             assertLe(g.traderPaid, tp, "traderPaid > traderPot");
-            assertLe(g.lpPaid, uint256(g.escrowed) - tp, "lpPaid > lpPot");
+            assertLe(g.lpPaid, uint256(g.escrowed) - tp + uint256(g.lpCarry), "lpPaid > lpPot");
         }
     }
 }

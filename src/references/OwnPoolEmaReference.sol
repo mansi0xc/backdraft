@@ -10,7 +10,7 @@ import {IReferencePrice} from "../interfaces/IReferencePrice.sol";
 /// @dev Uses a damped EMA of the pool's own tick history.
 ///      Fatal flaw: in the exogenous case the market moves, the pool goes stale,
 ///      and this EMA — which IS the pool's own history — reports zero gap.
-///      See idea.md §4.1 for the full explanation and §4.2 for measured error.
+///      See the README (Reference price) for the explanation and the measured error.
 ///      DO NOT use in production. Exists so the README can show the 16.6× accuracy
 ///      difference vs SplitV3Reference.
 contract OwnPoolEmaReference is IReferencePrice {

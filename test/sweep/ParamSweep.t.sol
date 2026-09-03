@@ -318,8 +318,8 @@ contract GasTableTest is BackdraftTestBase {
         uint256 hooked = g - gasleft();
 
         _report("swap, no gap", hooked, control);
-        assertLt(hooked, 335_000, "no-gap swap total");
-        assertLt(hooked - control, 130_000, "hook overhead on the common path");
+        assertLt(hooked, 262_000, "no-gap swap total");
+        assertLt(hooked - control, 95_000, "hook overhead on the common path");
     }
 
     /// @notice afterSwap opens a gap: one Gap push plus the eligibility snapshot.
@@ -333,7 +333,7 @@ contract GasTableTest is BackdraftTestBase {
 
         assertGt(hook.openGapIdx(poolId), 0, "precondition: a gap actually opened");
         _report("swap, opens gap", hooked, control);
-        assertLt(hooked, 490_000, "gap-opening swap total");
+        assertLt(hooked, 420_000, "gap-opening swap total");
     }
 
     /// @notice beforeSwap takes the surcharge (ERC-6909 mint) and afterSwap closes.
@@ -349,7 +349,7 @@ contract GasTableTest is BackdraftTestBase {
 
         assertGt(hook.gapAt(poolId, idx).escrowed, 0, "precondition: surcharge was taken");
         emit log_named_uint("swap, surcharged", hooked);
-        assertLt(hooked, 390_000, "surcharged swap total");
+        assertLt(hooked, 385_000, "surcharged swap total");
     }
 
     /// @notice The explicit settle() path: a gap that expires without being narrowed
