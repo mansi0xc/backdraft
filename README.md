@@ -59,12 +59,12 @@ ETHERSCAN_API_KEY=YOUR_KEY
 
 ## Running Tests
 
-212 tests across 26 suites. Everything except the fork suite runs without an RPC.
-The two fork tests and the eight sweep/gas-table tests print measurements and have no
-assertions; the other 202 do.
+223 tests across 26 suites. Everything except the fork suite runs without an RPC.
+The eight sweep/gas-table tests print measurements and have no assertions; every other
+test asserts, including the fork suite.
 
 ```bash
-# Everything that needs no network — 210 tests
+# Everything that needs no network — 215 tests
 forge test --no-match-path "test/fork/*"
 
 # Reference reader against live mainnet v3 pools — 2 tests
@@ -105,6 +105,11 @@ test/
   splitting/     splitting a close across many swaps must not discount it
   liquidity/     LpEligibility, PayoutCap
   lifecycle/     expiry, sign flip, auto-settle
+  fork/          Replay — the reference reader against the live mainnet v3 pools it
+                 names. Every other suite runs on a mock oracle, which proves the hook
+                 behaves correctly GIVEN a reference and nothing about whether the
+                 reader produces one. These recompute the reader's output from the raw
+                 pool calls and assert equality.
   security/      RouterAuth (identity forwarding), ClaimAuth, Ownership,
                  ReviewRegressions (external review 2026-09-03, six findings)
   fees/          FeeFlip (dynamic-fee override)
@@ -208,18 +213,16 @@ worst blocks, and the shipped path does not. Measured on the shipped path, p100 
 - **The gap threshold does not cover the reference's worst case.** 65 ticks against a
   measured p100 of 228.65 bps on the shipped path, in ~0.19% of blocks. Bounded by the
   graduated multiplier and the surcharge cap, not eliminated. See Measurement.
-- **The fee flip inverts at realistic gap sizes.** With `baseFee = 0.30%` and
-  `narrowingFee = 0.05%` the discount is 25 bps; the surcharge at a 100-tick gap and
-  `captureRateBps = 500` is 5 bps. A closer pays ~10 bps all-in, a widener 30. On the
-  pure LVR path LPs collect 5 bps of surcharge and forgo 25 bps of fee. "Closing costs
-  more than widening" holds only where the surcharge cap binds (≥ ~500 ticks at rate
-  500). `ReviewRegressions.t.sol` asserts the inversion. Ship with `narrowingFee`
-  disabled, or bound the discount by the surcharge collected on the same swap — not
-  implemented.
-- **Sweep is JIT-able.** `sweepUnclaimed` donates to whatever liquidity is in range at
-  sweep time, with no age filter. The claim path is JIT-proof; the remainder path is
-  not. Measured: a position one block old holding 90% of in-range liquidity receives
-  90% of the swept remainder. Not fixed.
+- **The fee discount is bounded by the surcharge on the same swap.** Below ~500
+  ticks the discount exactly rebates the surcharge, so a closer pays what a vanilla
+  pool would charge and the forgone LP fee reappears in escrow, where the ledger
+  splits it. Above that the full `narrowingFee` applies. Closing is never cheaper than
+  widening (fuzzed across 70–4000 ticks in `ReviewRegressions.t.sol`).
+- **Swept remainders wait for a next gap.** `sweepUnclaimed` no longer donates to
+  the pool (which paid whatever liquidity was in range at that instant, JIT included);
+  the remainder is carried into the LP pot of the next gap that escrows in the same
+  currency, whose claimants are age-filtered. If no such gap ever opens the carry sits
+  in the hook indefinitely. There is still no treasury and no owner withdrawal.
 - **Reference error is not bounded by the multiplier.** See Measurement. On the ~0.19%
   of blocks where the reference itself is more than 65 ticks wrong, a gap opens that
   should not, and the divergence multiplier raises the charge on it.
@@ -455,20 +458,23 @@ the defect it pins and the measurement that found it.
 
 ### External review, 2026-09-03
 
-Six findings against the pre-review build, each pinned in
+Seven findings against the pre-review build, each pinned in
 `test/security/ReviewRegressions.t.sol`:
 
 | # | finding | status |
 |---|---|---|
 | R1 | claim after sweep paid from other gaps' escrow | **fixed** — sweep marks pots exhausted; claims refuse swept gaps |
-| R2 | sweep donates to JIT liquidity | documented |
+| R2 | sweep donates to JIT liquidity | **fixed** — remainder carried into the next same-currency gap's LP pot |
 | R3 | swap crossing the reference opened an endogenous gap with an empty ledger | **fixed** — credited for the exit-side gap it created |
-| R4 | fee flip inverts "closing costs more" at gaps under ~500 ticks | documented |
+| R4 | fee flip inverts "closing costs more" at gaps under ~500 ticks | **fixed** — discount bounded by the surcharge on the same swap |
 | R5 | old-LP withdrawal in the lookback masked JIT adds in the denominator | **fixed** — decrement only for positions added inside the window |
 | R6 | `setPoolCfg` accepted `traderShareBps > 100%`, bricking every closing swap | **fixed** — bounded |
+| R7 | reference crossing the pool with no swap made every swap toward the new reference revert until expiry | **fixed** — beforeSwap closes a gap whose sign no longer matches the market. Found by the rewired invariant, not by reading. |
 
 The solvency invariant was rewritten in the same pass: it now sums
 `escrowed − lpPaid − traderPaid` over every non-swept gap (it previously counted only
 gaps not yet settled, which — because closing auto-settles — was almost nothing),
-includes `sweepUnclaimed` and `moveOracle` in the handler, and runs at depth 80. At
-depth 15 it could not reach sweep → late claim and did not catch R1; at 80 it does.
+includes `sweepUnclaimed` and `moveOracle` in the handler, runs at depth 80 with
+`fail_on_revert = true`, and counts pending carry as an obligation. At depth 15 it
+could not reach sweep → late claim and did not catch R1; at 80 it does. Wiring
+`moveOracle` surfaced R7 on the first run.

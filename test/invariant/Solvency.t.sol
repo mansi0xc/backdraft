@@ -97,6 +97,11 @@ contract SolvencyHandler is BackdraftTestBase {
     function doSwap(uint8 actorIdx, bool zeroForOne, uint128 amount) public {
         actorIdx = actorIdx % uint8(actors.length);
         amount = uint128(bound(amount, 1e15, 500_000e18));
+        // Deep sequences drift the pool to the price floor/ceiling, where the next swap
+        // in that direction reverts with PriceLimitAlreadyExceeded. Harness bound, not
+        // a hook property: skip rather than revert.
+        int24 t = _poolTick();
+        if ((zeroForOne && t < -800_000) || (!zeroForOne && t > 800_000)) return;
         _swap(actors[actorIdx], zeroForOne, -int256(uint256(amount)));
 
         uint256 idx = hook.openGapIdx(poolId);
@@ -181,13 +186,17 @@ contract SolvencyHandler is BackdraftTestBase {
             if (g.escrowed == 0) continue;
             // Outstanding obligation, settled or not: what has been escrowed and not
             // yet paid. A settled-but-unclaimed gap is still owed.
-            uint256 owed = uint256(g.escrowed) - uint256(g.lpPaid) - uint256(g.traderPaid);
+            uint256 owed = uint256(g.escrowed) + uint256(g.lpCarry)
+                         - uint256(g.lpPaid) - uint256(g.traderPaid);
             if (g.isCurrency0) {
                 total0 += owed;
             } else {
                 total1 += owed;
             }
         }
+        // Swept remainders waiting for a next gap are obligations too.
+        total0 += hook.pendingCarry(poolId, 1);
+        total1 += hook.pendingCarry(poolId, 0);
         ghost_escrowed0 = total0;
         ghost_escrowed1 = total1;
     }

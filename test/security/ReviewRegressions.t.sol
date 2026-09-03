@@ -19,6 +19,8 @@ import {Currency}          from "v4-core/types/Currency.sol";
 //       — DOCUMENTED, asserted here so the config surface says so
 //   R5  an old LP withdrawing inside the lookback masked a JIT add in the denominator
 //   R6  setPoolCfg accepted traderShareBps > 100%, which reverted every closing swap
+//   R7  reference crossing the pool with no swap made the next narrowing swap revert
+//       with EscrowCurrencyMismatch until expiry (found by the rewired invariant)
 // ============================================================
 contract ReviewRegressionsTest is BackdraftTestBase {
     address constant LP_A  = address(0x1001);
@@ -112,27 +114,86 @@ contract ReviewRegressionsTest is BackdraftTestBase {
 
     // ------------------------------------------------------------------ R2
 
-    /// @notice DOCUMENTED LIMITATION, asserted so it cannot be forgotten: donate() pays
-    ///         whatever liquidity is in range at sweep time, with no age filter. A
-    ///         position one block old receives its pro-rata share of the remainder.
-    function test_R2_SweepPaysJitLiquidity_KnownLimitation() public {
+    /// @notice The swept remainder no longer touches the pool. It is carried, in the
+    ///         hook's own balance, to the next gap that escrows in the same currency.
+    function test_R2_SweepCarriesRemainderInsteadOfDonating() public {
         _addLiquidity(LP_A, -6000, 6000, 10_000_000e18);
         vm.roll(block.number + minAgeBlocks + 1);
         uint256 idx = _cycle(ROHAN, VIK);
         BackdraftHook.Gap memory g = hook.gapAt(poolId, idx);
         vm.roll(uint256(g.expiryBlock) + sweepGraceBlocks + 1);
 
+        // JIT adds 90x the honest liquidity right before the sweep, as before.
         _modify(JIT, -6000, 6000, int256(90_000_000e18), bytes32(uint256(1)));
-        uint128 inRange = StateLibrary.getLiquidity(manager, poolId);
-        assertEq(inRange, 100_000_000e18, "10M honest + 90M one-block-old");
-
         (uint256 f0, uint256 f1) = StateLibrary.getFeeGrowthGlobals(manager, poolId);
+        uint256 remainder = uint256(g.escrowed) - g.lpPaid - g.traderPaid;
         hook.sweepUnclaimed(poolId, idx);
         (uint256 a0, uint256 a1) = StateLibrary.getFeeGrowthGlobals(manager, poolId);
-        uint256 donated = (((a0 - f0) + (a1 - f1)) * inRange) >> 128;
-        assertGt(donated, 0, "sweep donated");
-        // 90% of the remainder is now claimable by the JIT position.
-        // This is the sweep-side JIT vector. See README Limitations.
+
+        assertEq(a0, f0, "no fee growth: nothing was donated");
+        assertEq(a1, f1, "no fee growth: nothing was donated");
+        assertEq(hook.pendingCarry(poolId, g.isCurrency0 ? 1 : 0), remainder, "carried in full");
+    }
+
+    /// @notice The carry lands in the NEXT gap's LP pot, is claimable only by LPs that
+    ///         were old enough at that gap's open, and never enters the trader pot.
+    function test_R2_CarryIsClaimedByAgeFilteredLpsOfTheNextGap() public {
+        _addLiquidity(LP_A, -6000, 6000, 10_000_000e18);
+        vm.roll(block.number + minAgeBlocks + 1);
+
+        uint256 idx1 = _cycle(ROHAN, VIK);
+        BackdraftHook.Gap memory g1 = hook.gapAt(poolId, idx1);
+        Currency cur = g1.isCurrency0 ? poolKey.currency0 : poolKey.currency1;
+        vm.roll(uint256(g1.expiryBlock) + sweepGraceBlocks + 1);
+        hook.sweepUnclaimed(poolId, idx1);
+        uint256 carried = hook.pendingCarry(poolId, g1.isCurrency0 ? 1 : 0);
+        assertGt(carried, 0, "precondition: something carried");
+
+        // JIT shows up now, one block before the next gap. It is NOT eligible.
+        _modify(JIT, -6000, 6000, int256(90_000_000e18), bytes32(uint256(1)));
+
+        oracle.setRef(poolId, _poolTick());
+        uint256 idx2 = _cycle(ROHAN, VIK);
+        BackdraftHook.Gap memory g2 = hook.gapAt(poolId, idx2);
+        require(g2.isCurrency0 == g1.isCurrency0, "precondition: same currency");
+        assertEq(g2.lpCarry, carried, "carry attached to the next gap");
+        assertEq(hook.pendingCarry(poolId, g1.isCurrency0 ? 1 : 0), 0, "and cleared");
+
+        // Trader pot ignores the carry.
+        uint256 tp = uint256(g2.escrowed) * traderShareBps / 10_000;   // ledger explains fully
+        // JIT cannot claim.
+        vm.prank(JIT, JIT);
+        vm.expectRevert(abi.encodeWithSignature("Error(string)", "too new"));
+        hook.claimLp(poolId, idx2, -6000, 6000, bytes32(uint256(1)));
+
+        // LP_A's pot is escrow − traderPot + carry.
+        uint256 before = _hookBalance(cur);
+        vm.prank(LP_A, LP_A);
+        hook.claimLp(poolId, idx2, -6000, 6000, bytes32(0));
+        uint256 paid = before - _hookBalance(cur);
+        assertGt(paid, uint256(g2.escrowed) - tp, "LP_A received more than gap 2's own LP pot");
+        assertLe(paid, uint256(g2.escrowed) - tp + carried, "and no more than pot + carry");
+    }
+
+    /// @notice A gap that escrows in the OTHER currency leaves the carry untouched.
+    function test_R2_CarryWaitsForAGapInItsOwnCurrency() public {
+        _addLiquidity(LP_A, -6000, 6000, 10_000_000e18);
+        vm.roll(block.number + minAgeBlocks + 1);
+        uint256 idx1 = _cycle(ROHAN, VIK);
+        BackdraftHook.Gap memory g1 = hook.gapAt(poolId, idx1);
+        vm.roll(uint256(g1.expiryBlock) + sweepGraceBlocks + 1);
+        hook.sweepUnclaimed(poolId, idx1);
+        uint256 carried = hook.pendingCarry(poolId, g1.isCurrency0 ? 1 : 0);
+
+        // Open a gap on the other side so the closer pays in the other currency.
+        oracle.setRef(poolId, _poolTick());
+        _swap(ROHAN, true, -500_000e18);
+        uint256 idx2 = hook.openGapIdx(poolId);
+        _swap(VIK, false, -100_000e18);          // partial close, other currency
+        BackdraftHook.Gap memory g2 = hook.gapAt(poolId, idx2);
+        assertTrue(g2.isCurrency0 != g1.isCurrency0, "precondition: other currency");
+        assertEq(g2.lpCarry, 0, "carry not attached across currencies");
+        assertEq(hook.pendingCarry(poolId, g1.isCurrency0 ? 1 : 0), carried, "still pending");
     }
 
     // ------------------------------------------------------------------ R3
@@ -200,6 +261,34 @@ contract ReviewRegressionsTest is BackdraftTestBase {
         assertEq(uint256(g.eligibleLiqAtOpen), 10_000_000e18, "grief nets to zero");
     }
 
+    // ------------------------------------------------------------------ R7
+
+    /// @notice The reference crosses the pool while a gap is open, with no swap. The
+    ///         next swap toward the new reference must NOT revert; the stale gap closes
+    ///         and, if the new dislocation clears the threshold, a fresh gap opens.
+    function test_R7_ReferenceCrossingPoolDoesNotBrickSwaps() public {
+        _addLiquidity(LP_A, -6000, 6000, 10_000_000e18);
+        vm.roll(block.number + minAgeBlocks + 1);
+
+        _swap(ROHAN, false, -500_000e18);            // pool above reference (0)
+        uint256 idx = hook.openGapIdx(poolId);
+        assertGt(idx, 0);
+        int24 tickNow = _poolTick();
+        assertTrue(hook.gapAt(poolId, idx).gapPositive);
+
+        oracle.setRef(poolId, tickNow + 300);        // market leaps PAST the pool
+
+        // Toward the new reference = oneForZero, the direction the old gap called widening.
+        // Pre-fix: EscrowCurrencyMismatch revert.
+        _swap(VIK, false, -100_000e18);
+
+        assertTrue(hook.gapAt(poolId, idx).settled, "stale gap closed");
+        uint256 idx2 = hook.openGapIdx(poolId);
+        assertGt(idx2, idx, "fresh gap opened on the new dislocation");
+        assertFalse(hook.gapAt(poolId, idx2).gapPositive, "with the new sign");
+        assertGt(hook.gapAt(poolId, idx2).escrowed, 0, "and the corrector was surcharged");
+    }
+
     // ------------------------------------------------------------------ R6
 
     function test_R6_SetPoolCfgRejectsTraderShareAbove100Pct() public {
@@ -215,10 +304,10 @@ contract ReviewRegressionsTest is BackdraftTestBase {
     }
 }
 
-/// @notice R4. The FeeFlip suite only exercises the cap-bound regime. At a 100-tick gap
-///         the fee discount (25 bps) is 5x the surcharge (5 bps) and closing is CHEAPER
-///         than widening. This is the mechanism as shipped; the test states it rather
-///         than hides it. If the flip is bounded by the surcharge, invert the assertion.
+/// @notice R4. The FeeFlip suite only exercised the cap-bound regime, where the
+///         surcharge (200 bps) dwarfs the discount (25 bps). At a 100-tick gap the
+///         surcharge is 5 bps, and the unbounded discount made closing CHEAPER than
+///         widening. The discount is now bounded by the surcharge on the same swap.
 contract ReviewFeeFlipRegimeTest is BackdraftTestBase {
     address constant LP  = address(0x1001);
     address constant VIK = address(0xbbbb);
@@ -232,18 +321,43 @@ contract ReviewFeeFlipRegimeTest is BackdraftTestBase {
         vm.roll(block.number + minAgeBlocks + 1);
     }
 
-    function test_R4_AtRealisticGapClosingIsCheaperThanWidening_KnownInversion() public {
-        oracle.setRef(poolId, 100);
-        uint256 notional = 100_000e18;
+    /// @dev (fee paid, surcharge paid) by a closing swap of `notional` against `refTick`.
+    function _closerCosts(int24 refTick, uint256 notional) internal returns (uint256 fee, uint256 surcharge) {
+        oracle.setRef(poolId, refTick);
         uint128 liq = StateLibrary.getLiquidity(manager, poolId);
         (, uint256 gBefore) = StateLibrary.getFeeGrowthGlobals(manager, poolId);
+        uint256 idx = hook.gaps(poolId).length;
         _swap(VIK, false, -int256(notional));
         (, uint256 gAfter) = StateLibrary.getFeeGrowthGlobals(manager, poolId);
-        uint256 fee = ((gAfter - gBefore) * liq) >> 128;
-        uint256 surcharge = hook.gapAt(poolId, hook.gaps(poolId).length - 1).escrowed;
-        uint256 closerBps = (fee + surcharge) * 1e4 / notional;
-        uint256 widenerBps = 30;
-        assertLt(closerBps, widenerBps, "at a 100-tick gap the closer pays LESS than a widener");
-        assertLt(surcharge, notional * 25 / 1e4, "surcharge (5 bps) < fee discount (25 bps)");
+        fee = ((gAfter - gBefore) * liq) >> 128;
+        surcharge = hook.gapAt(poolId, idx).escrowed;
+    }
+
+    function test_R4_SmallGapDiscountIsBoundedBySurcharge() public {
+        uint256 notional = 100_000e18;
+        (uint256 fee, uint256 surcharge) = _closerCosts(100, notional);
+        assertGt(surcharge, 0, "precondition: surcharged");
+        assertLt(surcharge, notional * 25 / 1e4, "precondition: surcharge < full discount");
+        // The discount rebates the surcharge exactly: closer pays baseFee on the full
+        // notional, to rounding.
+        assertApproxEqRel(fee + surcharge, notional * 3000 / 1e6, 1e15,
+            "closer pays exactly the base fee when the surcharge is smaller than the discount");
+        assertGe(fee + surcharge + 1e6, notional * 3000 / 1e6, "never cheaper than a widener");
+    }
+
+    function test_R4_LargeGapStillGetsTheFullDiscount() public {
+        uint256 notional = 100_000e18;
+        (uint256 fee, uint256 surcharge) = _closerCosts(3000, notional);   // cap binds
+        // The pool fees what reaches it: notional minus the surcharge.
+        assertApproxEqRel(fee, (notional - surcharge) * 500 / 1e6, 1e12, "full narrowingFee applies");
+        assertGt(fee + surcharge, notional * 3000 / 1e6, "and the surcharge still dominates");
+    }
+
+    /// @notice Across gap sizes and notionals, a closer never pays less than a widener.
+    function testFuzz_R4_ClosingNeverCheaperThanWidening(int24 refTick, uint96 raw) public {
+        refTick = int24(bound(int256(refTick), 70, 4000));
+        uint256 notional = uint256(bound(raw, 1_000e18, 300_000e18));
+        (uint256 fee, uint256 surcharge) = _closerCosts(refTick, notional);
+        assertGe(fee + surcharge + 1e6, notional * 3000 / 1e6, "closing costs at least baseFee");
     }
 }
