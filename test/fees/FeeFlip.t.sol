@@ -223,10 +223,12 @@ contract FeeFlipTest is BackdraftTestBase {
 
 }
 
-/// @notice Static-fee variant of the same configuration. v4 reverts a swap if a
-///         non-dynamic pool's hook returns a fee override, so an unconditional override
-///         would brick every narrowing swap in any statically-priced pool the hook is
-///         attached to. narrowingFee is configured here and must simply be ignored.
+/// @notice Static-fee variant of the same configuration. v4 does NOT revert when a
+///         static-fee pool's hook returns an override; Hooks.beforeSwap drops it. These
+///         tests therefore pin observable behaviour (surcharge still taken, fee still
+///         the static one) and cannot distinguish whether the hook returned an override
+///         or not. The isDynamicFee guard in _narrowingFeeOverride is not pinned by any
+///         swap-level test; it is hygiene.
 contract FeeFlipStaticPoolTest is BackdraftTestBase {
 
     address constant LP    = address(0x1001);

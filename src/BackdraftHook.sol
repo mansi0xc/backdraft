@@ -104,8 +104,10 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     mapping(bytes32 => PositionInfo)                 public positions;
     mapping(bytes32 => mapping(uint256 => bool))     public lpClaimed;
 
-    // Transient slot: cached |gap| from beforeSwap for afterSwap to read (same tx)
-    // Using regular storage here because tstore is tx-scoped and we're on a single call path
+    // Per-swap scratch. This is exactly the shape transient storage is for (written and
+    // read within one transaction), but solc 0.8.26 has no `transient` keyword for
+    // structs, so it is regular storage: one warm SSTORE per swap. Moving it to
+    // tstore/tload via assembly is a straightforward gas win that is not done.
     /// @dev Per-swap scratch written by beforeSwap and read by afterSwap.
     ///      Packs into one slot (uint24 + 2 bools). `wasNarrowing` is the swap's
     ///      direction relative to the gap AT ENTRY — the only honest basis for
@@ -125,6 +127,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         uint24 absGapBefore;
         int24  refTick;
         bool   wasNarrowing;
+        bool   gapPositiveBefore;  // sign of the pre-swap gap, for crossing detection
         bool   valid;
     }
 
@@ -272,6 +275,12 @@ contract BackdraftHook is IHooks, IUnlockCallback {
             "narrowingFee > max"
         );
         require(c.baseFee <= LPFeeLibrary.MAX_LP_FEE, "baseFee > max");
+        // traderShareBps > 100% makes _traderPot exceed escrow, which underflows in
+        // _closeGap and reverts every closing swap. surchargeCapBps > 100% asks for more
+        // than the swapper put in, which v4 rejects as HookDeltaExceedsSwapAmount.
+        require(c.traderShareBps <= 10_000, "traderShare > 100%");
+        require(c.surchargeCapBps <= 10_000, "surchargeCap > 100%");
+        require(c.gapThresholdTicks > 0, "threshold is zero");
         // The flip is funded by the surcharge taken from the same swap. A discount is
         // only coherent if it is a discount: charging correcting flow MORE than the
         // pool's normal fee inverts the mechanism into a second tax on the arbitrage
@@ -282,6 +291,13 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         );
         cfg[id] = c;
         emit PoolCfgSet(id, c);
+
+        // baseFee was previously applied ONCE, in afterInitialize; changing it here had
+        // no effect on the pool. Push it whenever the pool is already initialised.
+        PoolKey memory key = _poolKeys[id];
+        if (address(key.hooks) == address(this) && LPFeeLibrary.isDynamicFee(key.fee)) {
+            poolManager.updateDynamicLPFee(key, c.baseFee);
+        }
     }
 
     /// @notice Allow or disallow a router's hookData as a source of user identity.
@@ -389,7 +405,13 @@ contract BackdraftHook is IHooks, IUnlockCallback {
 
             // Mirror the add: withdrawing in-range liquidity must decrement the running
             // total, or an add-then-remove permanently inflates `recentAdds`.
-            if (_isInRange(id, params.tickLower, params.tickUpper)) {
+            // Only when the position was itself added inside the lookback window: an
+            // OLD LP withdrawing must not cancel out a fresh JIT add in the running
+            // total, or the JIT liquidity lands in the eligible denominator (R5).
+            if (
+                _isInRange(id, params.tickLower, params.tickUpper)
+                    && uint256(p.addBlock) + cfg[id].minAgeBlocks > block.number
+            ) {
                 _pushCheckpoint(id, removed, false);
             }
         }
@@ -399,10 +421,11 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     /// @notice The LP fee to return from beforeSwap for a gap-CLOSING swap.
     ///
     /// @dev Returns 0 (no override, pool fee applies) unless the flip is configured AND
-    ///      the pool is a dynamic-fee pool. The second condition is not defensive
-    ///      politeness: v4 reverts the swap if a static-fee pool's hook returns an
-    ///      override, so returning one unconditionally would brick every narrowing swap
-    ///      in any statically-priced pool the hook is attached to.
+    ///      the pool is a dynamic-fee pool. v4 does not revert when a static-fee pool's
+    ///      hook returns an override — Hooks.beforeSwap only parses the fee when
+    ///      `key.fee.isDynamicFee()` and silently drops it otherwise — so the second
+    ///      condition is hygiene, not a brick guard. It keeps the returned value honest
+    ///      about what the pool will do with it.
     ///
     ///      Why the discount exists at all. The surcharge alone makes this pool a worse
     ///      venue for the flow that fixes its price: an arbitrageur's break-even widens,
@@ -452,7 +475,8 @@ contract BackdraftHook is IHooks, IUnlockCallback {
             // Invalidate the cache: afterSwap must not attribute this swap using
             // direction data from a previous one.
             _swapCache[id] = SwapCache({
-                absGapBefore: 0, refTick: 0, wasNarrowing: false, valid: false
+                absGapBefore: 0, refTick: 0, wasNarrowing: false,
+                gapPositiveBefore: false, valid: false
             });
             return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
         }
@@ -465,10 +489,11 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         // (exact-output, no open gap) can still be a legitimate widener.
         bool narrowing = GapMath.isNarrowing(gapBefore, params.zeroForOne);
         _swapCache[id] = SwapCache({
-            absGapBefore: GapMath.abs(gapBefore),
-            refTick:      refTick,
-            wasNarrowing: narrowing,
-            valid:        true
+            absGapBefore:      GapMath.abs(gapBefore),
+            refTick:           refTick,
+            wasNarrowing:      narrowing,
+            gapPositiveBefore: gapBefore > 0,
+            valid:             true
         });
 
         uint256 idx = openGapIdx[id];
@@ -665,33 +690,50 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         bool creditable = sc.valid && !sc.wasNarrowing;
         address trader = _resolveUser(sender, hookData);
 
+        // A swap that entered narrowing but CROSSED the reference and exited on the far
+        // side did not correct anything: every tick of the exit-side gap is its own
+        // doing. It is credited as a widener starting from zero, on a gap opened for
+        // the far side (R3). Without this the ledger is empty and an endogenous gap
+        // settles as if it were exogenous.
+        bool crossed = sc.wasNarrowing && _crossedReference(sc, gapNow);
+
         if (idx == 0) {
             // Reaching here means the gap was BELOW threshold at entry (beforeSwap
             // would otherwise have opened it) and is above it now — so this swap
             // created the dislocation. It is the originator and must be credited.
             if (absNow > c.gapThresholdTicks) {
                 _openGap(id, refTick, tick, gapNow);
-                _credit(id, openGapIdx[id], trader, sc.absGapBefore, absNow, creditable);
+                if (crossed) _credit(id, openGapIdx[id], trader, 0, absNow, true);
+                else         _credit(id, openGapIdx[id], trader, sc.absGapBefore, absNow, creditable);
             }
             return (IHooks.afterSwap.selector, 0);
         }
 
         Gap storage g = _gaps[id][idx];
 
-        _credit(id, idx, trader, sc.absGapBefore, absNow, creditable);
+        if (!crossed) {
+            _credit(id, idx, trader, sc.absGapBefore, absNow, creditable);
 
-        // maxAbsGap is the denominator of the poisoning defence (§3.3) and must
-        // track only how wide WIDENERS pushed the gap. A narrowing swap can only
-        // exceed it by overshooting, and counting that overshoot would inflate the
-        // denominator, shrink `explained`, and silently move value from the trader
-        // pot to LPs on every overshot close.
-        if (creditable && absNow > g.maxAbsGap) g.maxAbsGap = absNow;
+            // maxAbsGap is the denominator of the poisoning defence (§3.3) and must
+            // track only how wide WIDENERS pushed the gap. A narrowing swap can only
+            // exceed it by overshooting, and counting that overshoot would inflate the
+            // denominator, shrink `explained`, and silently move value from the trader
+            // pot to LPs on every overshot close.
+            if (creditable && absNow > g.maxAbsGap) g.maxAbsGap = absNow;
+        }
 
         // Close on: narrowed under threshold, OR overshoot (sign flip)
         // Sign flip must close — otherwise escrow currency direction is ambiguous (§3.2)
         bool flipped = gapNow != 0 && (gapNow > 0) != g.gapPositive;
         if (absNow <= c.gapThresholdTicks || flipped) {
             _closeGap(id, idx);
+        }
+
+        // The crossing swap left an above-threshold gap on the far side: that is a new,
+        // endogenous gap and the swap that made it is its sole contributor.
+        if (crossed && absNow > c.gapThresholdTicks) {
+            _openGap(id, refTick, tick, gapNow);
+            _credit(id, openGapIdx[id], trader, 0, absNow, true);
         }
 
         return (IHooks.afterSwap.selector, 0);
@@ -773,6 +815,10 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         uint256 lpPot     = uint256(g.escrowed) - traderPot;
         uint256 remainder = (lpPot - uint256(g.lpPaid)) + (traderPot - uint256(g.traderPaid));
         g.swept = true;
+        // The pots are now exhausted. Without this a claim arriving AFTER the sweep is
+        // still owed `pot - paid` and is paid out of OTHER gaps' escrow (R1).
+        g.lpPaid     = uint128(lpPot);
+        g.traderPaid = uint128(traderPot);
         if (remainder == 0) return;
 
         Currency cur = g.isCurrency0 ? _currency0[id] : _currency1[id];
@@ -788,6 +834,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     function claimTrader(PoolId id, uint256 gapIdx) external {
         Gap storage g = _gaps[id][gapIdx];
         require(g.settled && g.totalContribution > 0, "n/a");
+        require(!g.swept, "swept");
         bytes32 k = _contributionKey(id, gapIdx, msg.sender);
         uint128 c = contribution[k];
         require(c > 0, "nothing");
@@ -821,6 +868,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
 
         Gap storage g = _gaps[id][gapIdx];
         require(g.settled, "not settled");
+        require(!g.swept, "swept");
         require(!lpClaimed[positionKey][gapIdx], "claimed");
 
         PositionInfo memory p = positions[positionKey];
@@ -936,6 +984,13 @@ contract BackdraftHook is IHooks, IUnlockCallback {
             emit Settled(id, idx, _traderPot(id, g), uint256(g.escrowed) - _traderPot(id, g));
         }
         emit GapClosed(id, idx, g.escrowed);
+    }
+
+    /// @dev True when the swap ended on the opposite side of the reference from where
+    ///      it started. Only meaningful for a swap that entered narrowing.
+    function _crossedReference(SwapCache memory sc, int24 gapNow) internal pure returns (bool) {
+        if (gapNow == 0 || sc.absGapBefore == 0) return false;
+        return (gapNow > 0) != sc.gapPositiveBefore;
     }
 
     function _isGapOpen(PoolId id, uint256 idx) internal view returns (bool) {

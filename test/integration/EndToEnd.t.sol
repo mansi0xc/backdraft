@@ -111,8 +111,11 @@ contract EndToEndTest is BackdraftTestBase {
         assertGt(escrowed, 0, "escrowed should be non-zero after Vik");
         assertGt(hookCur0After, hookCur0Before, "hook collected surcharge in currency0");
 
-        // Gap should be closed now
-        assertEq(hook.openGapIdx(poolId), 0, "gap should be closed after Vik");
+        // The gap Vik closed is settled. (Vik's 2M swap overshoots far past the
+        // reference; the far-side dislocation it leaves is a NEW gap that Vik owns —
+        // see ReviewRegressions R3 — so openGapIdx is not necessarily 0 here.)
+        assertTrue(hook.gapAt(poolId, gapIdx).settled, "gap should be closed after Vik");
+        assertTrue(hook.openGapIdx(poolId) != gapIdx, "closed gap is no longer the open one");
 
         // ── Step 6: settle() ─────────────────────────────────────────
         if (!hook.gapAt(poolId, gapIdx).settled) hook.settle(poolId, gapIdx);

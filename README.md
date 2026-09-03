@@ -59,10 +59,12 @@ ETHERSCAN_API_KEY=YOUR_KEY
 
 ## Running Tests
 
-205 tests across 24 suites. Everything except the fork suite runs without an RPC.
+212 tests across 26 suites. Everything except the fork suite runs without an RPC.
+The two fork tests and the eight sweep/gas-table tests print measurements and have no
+assertions; the other 202 do.
 
 ```bash
-# Everything that needs no network — 203 tests
+# Everything that needs no network — 210 tests
 forge test --no-match-path "test/fork/*"
 
 # Reference reader against live mainnet v3 pools — 2 tests
@@ -71,7 +73,7 @@ forge test --match-path "test/fork/*" --fork-url $MAINNET_RPC_URL
 # Gas table
 forge test --match-contract GasTableTest -vv
 
-# Static analysis — see SECURITY.md for the triage
+# Static analysis
 forge build --build-info && slither . --ignore-compile --filter-paths "lib/|test/|script/"
 ```
 
@@ -103,7 +105,8 @@ test/
   splitting/     splitting a close across many swaps must not discount it
   liquidity/     LpEligibility, PayoutCap
   lifecycle/     expiry, sign flip, auto-settle
-  security/      RouterAuth (identity forwarding), ClaimAuth
+  security/      RouterAuth (identity forwarding), ClaimAuth, Ownership,
+                 ReviewRegressions (external review 2026-09-03, six findings)
   fees/          FeeFlip (dynamic-fee override)
   invariant/     Solvency — hook balance ≥ outstanding obligations
   integration/   EndToEnd
@@ -205,6 +208,24 @@ worst blocks, and the shipped path does not. Measured on the shipped path, p100 
 - **The gap threshold does not cover the reference's worst case.** 65 ticks against a
   measured p100 of 228.65 bps on the shipped path, in ~0.19% of blocks. Bounded by the
   graduated multiplier and the surcharge cap, not eliminated. See Measurement.
+- **The fee flip inverts at realistic gap sizes.** With `baseFee = 0.30%` and
+  `narrowingFee = 0.05%` the discount is 25 bps; the surcharge at a 100-tick gap and
+  `captureRateBps = 500` is 5 bps. A closer pays ~10 bps all-in, a widener 30. On the
+  pure LVR path LPs collect 5 bps of surcharge and forgo 25 bps of fee. "Closing costs
+  more than widening" holds only where the surcharge cap binds (≥ ~500 ticks at rate
+  500). `ReviewRegressions.t.sol` asserts the inversion. Ship with `narrowingFee`
+  disabled, or bound the discount by the surcharge collected on the same swap — not
+  implemented.
+- **Sweep is JIT-able.** `sweepUnclaimed` donates to whatever liquidity is in range at
+  sweep time, with no age filter. The claim path is JIT-proof; the remainder path is
+  not. Measured: a position one block old holding 90% of in-range liquidity receives
+  90% of the swept remainder. Not fixed.
+- **Reference error is not bounded by the multiplier.** See Measurement. On the ~0.19%
+  of blocks where the reference itself is more than 65 ticks wrong, a gap opens that
+  should not, and the divergence multiplier raises the charge on it.
+- **Position ownership is not tracked across NFT transfer.** Positions are keyed by the
+  address the router names at add time. If a PositionManager NFT changes hands, the
+  seller keeps the claim.
 - **One token pair.** All measurement is ETH/USDC.
 
 ---
@@ -300,9 +321,11 @@ How often that matters, same window:
 
 So roughly two blocks in a thousand can open a gap that is an artifact of reference
 error rather than a real dislocation, and on the worst of them the artifact is large
-enough to charge near the cap. The graduated divergence multiplier is what stands
-between that and a mischarge — and it is aimed at the right thing, because divergence
-and error peak together — but it is a price on the symptom, not a bound on the error.
+enough to charge near the cap. Nothing in the shipped design reduces that mischarge.
+The divergence multiplier can only *raise* a surcharge, and because divergence and
+reference error peak together, on exactly those blocks it makes the mischarge larger,
+not smaller. The multiplier is a deterrent against pushing the reference; it is not a
+bound on the reference being wrong. Stated as a limitation below.
 
 This is stated rather than fixed. Raising the threshold to cover p100 would blind the
 hook to most real dislocations; the truncated reference in `updatedAppendix.md` is the
@@ -426,8 +449,26 @@ and not implemented.
 Full table and unmodelled assumptions: `out/manipulation_cost_25785425_25799780.md` in
 the measurement repo.
 
-`CHANGES.md` — the bug-fix record: nine classes of defect found and fixed across the
-build, each with the test that pins it.
+`CHANGES.md` — the build log. The bug-fix record is the test suite itself: every
+patch directory (`exactout/`, `splitting/`, `lifecycle/`, `security/`, …) opens with
+the defect it pins and the measurement that found it.
 
-`SECURITY.md` — Slither triage: 15 findings down to 6, with the reason each remaining
-one is a tuple-destructuring false positive rather than a suppressed result.
+### External review, 2026-09-03
+
+Six findings against the pre-review build, each pinned in
+`test/security/ReviewRegressions.t.sol`:
+
+| # | finding | status |
+|---|---|---|
+| R1 | claim after sweep paid from other gaps' escrow | **fixed** — sweep marks pots exhausted; claims refuse swept gaps |
+| R2 | sweep donates to JIT liquidity | documented |
+| R3 | swap crossing the reference opened an endogenous gap with an empty ledger | **fixed** — credited for the exit-side gap it created |
+| R4 | fee flip inverts "closing costs more" at gaps under ~500 ticks | documented |
+| R5 | old-LP withdrawal in the lookback masked JIT adds in the denominator | **fixed** — decrement only for positions added inside the window |
+| R6 | `setPoolCfg` accepted `traderShareBps > 100%`, bricking every closing swap | **fixed** — bounded |
+
+The solvency invariant was rewritten in the same pass: it now sums
+`escrowed − lpPaid − traderPaid` over every non-swept gap (it previously counted only
+gaps not yet settled, which — because closing auto-settles — was almost nothing),
+includes `sweepUnclaimed` and `moveOracle` in the handler, and runs at depth 80. At
+depth 15 it could not reach sweep → late claim and did not catch R1; at 80 it does.

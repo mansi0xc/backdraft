@@ -81,9 +81,9 @@ contract ExogenousTest is BackdraftTestBase {
         oracle.setRef(poolId, 200);
         int24 tickBefore = _poolTick();
 
+        uint256 idx = hook.gaps(poolId).length;   // the gap beforeSwap will push
         _swap(VIK, false, -300_000e18);
 
-        uint256 idx = hook.gaps(poolId).length - 1;
         assertGt(idx, 0, "a gap must have been recorded");
         assertEq(hook.gapAt(poolId, idx).tickAtOpen, tickBefore,
             "exogenous gap must open on the pre-swap tick");
@@ -112,9 +112,9 @@ contract ExogenousTest is BackdraftTestBase {
     ///         move, so LPs — who bore the loss — receive the whole capture.
     function test_PureExogenous_EmptyLedger_AllToLps() public {
         oracle.setRef(poolId, 200);
+        uint256 idx = hook.gaps(poolId).length;   // the gap beforeSwap will push
         _swap(VIK, false, -300_000e18);
 
-        uint256 idx = hook.gaps(poolId).length - 1;
         BackdraftHook.Gap memory g = hook.gapAt(poolId, idx);
 
         assertGt(g.escrowed, 0, "precondition: something was captured");
@@ -135,9 +135,9 @@ contract ExogenousTest is BackdraftTestBase {
     /// @notice The arbitrageur cannot claim any of what it paid on an exogenous gap.
     function test_PureExogenous_ArbitrageurClaimsNothing() public {
         oracle.setRef(poolId, 200);
+        uint256 idx = hook.gaps(poolId).length;   // the gap beforeSwap will push
         _swap(VIK, false, -300_000e18);
 
-        uint256 idx = hook.gaps(poolId).length - 1;
         if (!hook.gapAt(poolId, idx).settled) hook.settle(poolId, idx);
 
         assertEq(_contrib(idx, VIK), 0, "corrector must hold no ledger credit");
@@ -215,15 +215,25 @@ contract ExogenousTest is BackdraftTestBase {
         uint256 c0Before = _hookBalance(poolKey.currency0);
         uint256 c1Before = _hookBalance(poolKey.currency1);
 
+        uint256 idx = hook.gaps(poolId).length;   // the gap beforeSwap will push
         _swap(VIK, false, -300_000e18);
 
         uint256 captured = (_hookBalance(poolKey.currency0) - c0Before)
                          + (_hookBalance(poolKey.currency1) - c1Before);
         assertGt(captured, 0, "exogenous dislocation went uncaptured");
 
-        uint256 idx = hook.gaps(poolId).length - 1;
         assertEq(hook.gapAt(poolId, idx).totalContribution, 0,
             "no swap in this pool widened the gap, so the ledger must be empty");
         assertEq(_contrib(idx, VIK), 0, "corrector must hold no credit at any gap size");
+
+        // If VIK overshot past the reference by more than the threshold, the far-side
+        // dislocation is a NEW gap VIK created and is credited to VIK (R3). That is not
+        // credit on the gap VIK closed.
+        uint256 open = hook.openGapIdx(poolId);
+        if (open != 0 && open != idx) {     // idx itself may still be open on a partial close
+            assertGt(open, idx, "any other open gap is a later, far-side one");
+            BackdraftHook.Gap memory far = hook.gapAt(poolId, open);
+            assertEq(far.totalContribution, far.maxAbsGap, "overshooter owns the far-side gap");
+        }
     }
 }

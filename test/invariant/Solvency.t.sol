@@ -10,6 +10,7 @@ import {IPoolManager}      from "v4-core/interfaces/IPoolManager.sol";
 import {PoolId}            from "v4-core/types/PoolId.sol";
 import {PoolKey}           from "v4-core/types/PoolKey.sol";
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
+import {IPoolManager as IPM} from "v4-core/interfaces/IPoolManager.sol";
 
 // ============================================================
 // Solvency invariant suite
@@ -40,6 +41,32 @@ contract SolvencyHandler is BackdraftTestBase {
 
     // actors
     address[] public actors;
+    struct Range { int24 lo; int24 hi; bytes32 salt; }
+    mapping(address => Range) public lastRange;
+    uint256 internal saltNonce;
+
+    /// @dev A fresh salt per add. The v4-core test router keys every position under
+    ///      its OWN address, so two adds to the same (range, salt) merge into one
+    ///      router position; a top-up whose accrued fees exceed its principal then
+    ///      trips the router's delta-sign assert. That is a harness artifact, not a
+    ///      hook property, and unique salts remove it.
+    function _salt(uint8) internal returns (bytes32) {
+        return bytes32(++saltNonce);
+    }
+
+    function _addLiquiditySalted(address lp, int24 lo, int24 hi, uint128 liq, bytes32 salt) internal {
+        vm.startPrank(lp, lp);
+        token0.approve(address(lpRouter), type(uint256).max);
+        token1.approve(address(lpRouter), type(uint256).max);
+        lpRouter.modifyLiquidity(
+            poolKey,
+            IPoolManager.ModifyLiquidityParams({
+                tickLower: lo, tickUpper: hi, liquidityDelta: int256(uint256(liq)), salt: salt
+            }),
+            abi.encode(lp)
+        );
+        vm.stopPrank();
+    }
 
     function setUp() public override {
         super.setUp();
@@ -61,7 +88,9 @@ contract SolvencyHandler is BackdraftTestBase {
         tickUpper = _alignTick(tickUpper, 60, 6000);
         if (tickLower >= tickUpper) tickUpper = tickLower + 60;
         liq = uint128(bound(liq, 1e18, 1_000_000e18));
-        _addLiquidity(actors[actorIdx], tickLower, tickUpper, liq);
+        bytes32 salt = _salt(actorIdx);
+        _addLiquiditySalted(actors[actorIdx], tickLower, tickUpper, liq, salt);
+        lastRange[actors[actorIdx]] = Range(tickLower, tickUpper, salt);
         _trackOpenGap();
     }
 
@@ -112,13 +141,20 @@ contract SolvencyHandler is BackdraftTestBase {
         BackdraftHook.Gap memory g = hook.gapAt(poolId, idx);
         if (!g.settled) return;
 
-        bytes32 posKey = hook.positionKeyFor(
-            poolId, actors[actorIdx], int24(-6000), int24(6000), bytes32(0)
-        );
+        Range memory r = lastRange[actors[actorIdx]];
+        if (r.lo == r.hi) return;
+        bytes32 posKey = hook.positionKeyFor(poolId, actors[actorIdx], r.lo, r.hi, r.salt);
         if (hook.lpClaimed(posKey, idx)) return;
 
         vm.prank(actors[actorIdx], actors[actorIdx]);
-        try hook.claimLp(poolId, idx, int24(-6000), int24(6000), bytes32(0)) {} catch {}
+        try hook.claimLp(poolId, idx, r.lo, r.hi, r.salt) {} catch {}
+        _syncEscrowGhost();
+    }
+
+    function doSweep(uint256 gapIdxHint) public {
+        if (allGapIndices.length == 0) return;
+        uint256 idx = allGapIndices[gapIdxHint % allGapIndices.length];
+        try hook.sweepUnclaimed(poolId, idx) {} catch {}
         _syncEscrowGhost();
     }
 
@@ -141,12 +177,15 @@ contract SolvencyHandler is BackdraftTestBase {
         // Index 0 is sentinel — skip it
         for (uint256 i = 1; i < allGaps.length; i++) {
             BackdraftHook.Gap memory g = allGaps[i];
-            if (g.settled) continue;   // settled gaps: obligation discharged on claim
+            if (g.swept) continue;     // swept: nothing further can be claimed
             if (g.escrowed == 0) continue;
+            // Outstanding obligation, settled or not: what has been escrowed and not
+            // yet paid. A settled-but-unclaimed gap is still owed.
+            uint256 owed = uint256(g.escrowed) - uint256(g.lpPaid) - uint256(g.traderPaid);
             if (g.isCurrency0) {
-                total0 += g.escrowed;
+                total0 += owed;
             } else {
-                total1 += g.escrowed;
+                total1 += owed;
             }
         }
         ghost_escrowed0 = total0;
@@ -183,13 +222,15 @@ contract SolvencyTest is StdInvariant, Test {
         // Only fuzz the handler
         targetContract(address(handler));
 
-        bytes4[] memory selectors = new bytes4[](6);
+        bytes4[] memory selectors = new bytes4[](8);
         selectors[0] = SolvencyHandler.addLiq.selector;
         selectors[1] = SolvencyHandler.doSwap.selector;
         selectors[2] = SolvencyHandler.doSettle.selector;
         selectors[3] = SolvencyHandler.doClaimTrader.selector;
         selectors[4] = SolvencyHandler.doClaimLp.selector;
         selectors[5] = SolvencyHandler.advanceBlocks.selector;
+        selectors[6] = SolvencyHandler.moveOracle.selector;
+        selectors[7] = SolvencyHandler.doSweep.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
     }
 
@@ -249,21 +290,20 @@ contract SolvencyTest is StdInvariant, Test {
         assertFalse(gaps[idx].settled, "invariant: open gap is marked settled");
     }
 
-    /// @notice traderPot can never exceed escrowed.
-    function invariant_traderPotBounded() public view {
+    /// @notice Paid never exceeds pot, per gap: lpPaid <= lpPot and traderPaid <= traderPot.
+    function invariant_paidNeverExceedsPot() public view {
         BackdraftHook h = handler.hook();
         PoolId id = handler.poolId();
         BackdraftHook.Gap[] memory gaps = h.gaps(id);
+        uint16 share = handler.traderShareBps();
         for (uint256 i = 1; i < gaps.length; i++) {
-            if (gaps[i].escrowed == 0) continue;
-            // traderPot = escrowed * traderShareBps/10000 * min(contrib,maxAbsGap)/maxAbsGap
-            // By construction: traderShareBps <= 10000 and min/max <= 1 → traderPot <= escrowed
-            // We verify indirectly: traderShareBps cap
-            assertLe(
-                handler.traderShareBps(),
-                uint16(10_000),
-                "invariant: traderShareBps > 10000 would allow traderPot > escrowed"
-            );
+            BackdraftHook.Gap memory g = gaps[i];
+            if (g.escrowed == 0) continue;
+            uint256 explained = g.totalContribution > g.maxAbsGap ? g.maxAbsGap : g.totalContribution;
+            uint256 tp = g.maxAbsGap == 0 ? 0
+                : (uint256(g.escrowed) * share * explained) / (uint256(g.maxAbsGap) * 10_000);
+            assertLe(g.traderPaid, tp, "traderPaid > traderPot");
+            assertLe(g.lpPaid, uint256(g.escrowed) - tp, "lpPaid > lpPot");
         }
     }
 }

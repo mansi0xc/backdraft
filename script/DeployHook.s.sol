@@ -117,7 +117,9 @@ contract DeployHook is Script {
         console2.log("   fastPool:", net.fastPool);
         console2.log("   deepPool:", net.deepPool);
         console2.log("   invertTicks: true if the v3 pair's token order differs from the v4 pool's");
-        console2.log("2. hook.setPoolCfg(poolId, {...}) -- afterInitialize reverts without it");
+        console2.log("2. hook.setPoolCfg(poolId, {...}) BEFORE initialize. afterInitialize does");
+        console2.log("   NOT revert without it: a dynamic-fee pool is seeded with baseFee=0 and");
+        console2.log("   trades fee-free until setPoolCfg is called (which now re-pushes the fee).");
         console2.log("   divSlopeBps / maxDivMultBps drive the divergence curve. Leaving");
         console2.log("   divSlopeBps at 0 keeps the multiplier at 1.00x, which restores the");
         console2.log("   pre-appendix-10 behaviour of not pricing reference manipulation.");
