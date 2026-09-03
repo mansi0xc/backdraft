@@ -1,3 +1,4 @@
+import Image from "next/image";
 import Reveal from "@/components/Reveal";
 import GapReplay from "@/components/GapReplay";
 import ArchMap from "@/components/ArchMap";
@@ -7,7 +8,8 @@ export default function Page() {
   return (
     <main>
       <nav className="nav">
-        <a href="#top" className="nav__mark">
+        <a href="#top" className="nav__mark" style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+          <Image src="/logo.png" alt="Backdraft" width={30} height={30} style={{ display: "block" }} />
           Backdraft
         </a>
         <span className="nav__meta">UHI10 · HK-UHI10-1088</span>

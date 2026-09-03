@@ -25,6 +25,20 @@ export const metadata: Metadata = {
   title: "Backdraft. The pool is sitting on money.",
   description:
     "A Uniswap v4 hook that prices the mispricing a swap leaves behind, and returns the captured value to the traders who created it and the LPs who funded it. UHI10, HK-UHI10-1088.",
+  icons: {
+    icon: "/favicon.ico",
+  },
+  openGraph: {
+    title: "Backdraft. The pool is sitting on money.",
+    description:
+      "A Uniswap v4 hook that prices the mispricing a swap leaves behind, and returns the captured value to the traders who created it and the LPs who funded it.",
+    images: [{ url: "/logo.png", width: 527, height: 473 }],
+  },
+  twitter: {
+    card: "summary",
+    title: "Backdraft. The pool is sitting on money.",
+    images: ["/logo.png"],
+  },
 };
 
 export default function RootLayout({
