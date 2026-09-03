@@ -10,7 +10,7 @@ optimizer_runs = 1_000_000
 via_ir = true
 gas_limit = "9999999999999999"
 fuzz = { runs = 10_000 }
-invariant = { runs = 128, depth = 80 } 
+invariant = { runs = 128, depth = 80, fail_on_revert = true }   # depth 80 reaches sweep -> late claim (depth 15 could not); fail_on_revert pins "the hook never reverts a swap"
 
 [rpc_endpoints]
 mainnet = "${MAINNET_RPC_URL}"

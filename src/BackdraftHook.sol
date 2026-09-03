@@ -76,6 +76,8 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         uint128 totalContribution;  // sum of tick-widening across all contributors
         uint128 lpPaid;             // cumulative LP claims — caps the pot (see claimLp)
         uint128 traderPaid;         // cumulative trader claims — caps the pot
+        uint128 lpCarry;            // unclaimed remainder swept in from earlier gaps in
+                                    // the same currency — LP pot only, never split
         uint24  maxAbsGap;          // largest |gap| reached — denominator of poisoning defence
         bool    gapPositive;        // sign at open; sign flip CLOSES the gap
         bool    isCurrency0;        // set on first surcharge, then asserted
@@ -148,9 +150,18 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     ///         about, merely relocated.
     mapping(address => bool) public allowedRouters;
 
-    /// @dev Kept so sweepUnclaimed() can call donate(). The individual currencies are
-    ///      already cached for payouts; donate needs the whole key.
+    /// @dev Whole key, so setPoolCfg can re-push baseFee to an initialised dynamic pool.
     mapping(PoolId => PoolKey) private _poolKeys;
+
+    /// @notice Swept remainders waiting for the next gap in the same currency.
+    /// @dev    R2 (review 2026-09-03): sweepUnclaimed used to donate() the remainder to
+    ///         the pool, which credits whatever liquidity is in range at that instant —
+    ///         a position one block old included. That reopened, on the remainder path,
+    ///         the JIT vector the age filter closes on the claim path. The remainder now
+    ///         stays in the hook's ERC-6909 balance and is folded into the LP pot of the
+    ///         next gap that escrows in the same currency, whose claimants are age- and
+    ///         range-filtered like any other. Index 1 is currency0, 0 is currency1.
+    mapping(PoolId => uint128[2]) public pendingCarry;
 
     // Simple cumulative liquidity-added checkpoint for eligibility denominator
     // Keyed by poolId; stores (blockNumber => cumulative added)
@@ -166,10 +177,12 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     // =========================================================================
 
     /// @notice A gap's escrow must stay in a single currency. Unreachable while the
-    ///         sign-flip rule holds (narrowing direction is fixed for a gap's life);
-    ///         a named error rather than assert() so a trace says which invariant broke.
+    ///         sign-flip rules hold — afterSwap closes on a swap-driven flip, beforeSwap
+    ///         closes on a reference-driven one (R7); a named error rather than assert()
+    ///         so a trace says which invariant broke.
     error EscrowCurrencyMismatch(PoolId id, uint256 gapIdx);
 
+    /// @notice Remainder of `gapIdx` moved to `pendingCarry` for the next gap's LP pot.
     event SweptToLps(PoolId indexed id, uint256 gapIdx, uint256 amount);
     event RouterAllowed(address indexed router, bool allowed);
     event OwnerProposed(address indexed currentOwner, address indexed proposedOwner);
@@ -340,7 +353,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         _gaps[id].push(Gap({
             openBlock: 0, expiryBlock: 0, refTickAtOpen: 0, tickAtOpen: 0,
             eligibleLiqAtOpen: 0, escrowed: 0, totalContribution: 0,
-            lpPaid: 0, traderPaid: 0,
+            lpPaid: 0, traderPaid: 0, lpCarry: 0,
             maxAbsGap: 0, gapPositive: false, isCurrency0: false, settled: true, swept: true
         }));
 
@@ -446,14 +459,39 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     ///      but the surcharge side depends on gap and notional and cannot be bounded
     ///      statically — a captureRateBps low enough relative to the fee discount would
     ///      make correcting flow net-cheaper than not trading. Sweep for it.
-    function _narrowingFeeOverride(uint24 poolFee, uint24 narrowingFee)
-        internal
-        pure
-        returns (uint24)
-    {
+    ///      R4 (review 2026-09-03): the inequality above was asserted only where the
+    ///      surcharge cap binds. At a 100-tick gap and captureRateBps = 500 the surcharge
+    ///      is 5 bps and a 3000 -> 500 discount is 25 bps, so a closer paid ~10 bps all-in
+    ///      against a widener's 30, and on the pure LVR path LPs were net WORSE off than
+    ///      in a vanilla pool. The discount is now bounded by the surcharge taken from the
+    ///      same swap: the LP fee is reduced by at most the surcharge rate, so
+    ///
+    ///          closer pays  >=  baseFee   at every gap size, with equality when the
+    ///                                     surcharge is smaller than the full discount.
+    ///
+    ///      At small gaps the discount exactly rebates the surcharge and the closer pays
+    ///      what a vanilla pool would charge; the LP fee foregone reappears in escrow,
+    ///      where it is split by the ledger. At large gaps the full discount applies and
+    ///      the surcharge still dominates. Closing is never cheaper than widening.
+    function _narrowingFeeOverride(
+        uint24 poolFee, uint24 baseFee, uint24 narrowingFee, uint256 surcharge, uint256 notional
+    ) internal pure returns (uint24) {
         if (narrowingFee == NO_FEE_OVERRIDE) return 0;
         if (!LPFeeLibrary.isDynamicFee(poolFee)) return 0;
-        return narrowingFee | LPFeeLibrary.OVERRIDE_FEE_FLAG;
+
+        // The pool charges its LP fee on what reaches it, which is notional minus the
+        // surcharge the hook already took. For "closer pays >= baseFee on the full
+        // notional" to hold exactly:
+        //
+        //     s + (n - s)(b - d) >= n*b   <=>   d <= s(1 - b) / (n - s)
+        //
+        // in v4 fee units (1e6 = 100%). mulDiv floors, so the bound is never exceeded.
+        if (surcharge == 0 || surcharge >= notional) return 0;
+        uint256 discountCap  = FullMath.mulDiv(surcharge, 1e6 - uint256(baseFee), notional - surcharge);
+        uint256 fullDiscount = uint256(baseFee) - uint256(narrowingFee);
+        uint256 discount     = discountCap < fullDiscount ? discountCap : fullDiscount;
+        uint24  fee           = uint24(uint256(baseFee) - discount);
+        return fee | LPFeeLibrary.OVERRIDE_FEE_FLAG;
     }
 
     // =========================================================================
@@ -504,6 +542,17 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         // next swap that happened to be narrowing against a 2-tick residual paid the
         // full maxAbsGap peak rate. One innocent trader eating a stale surcharge.
         if (idx != 0 && block.number > _gaps[id][idx].expiryBlock) {
+            _closeGap(id, idx);
+            idx = 0;
+        }
+
+        // R7 (review 2026-09-03): the REFERENCE can cross the pool without any swap.
+        // The open gap then has the wrong sign relative to the market, the next
+        // narrowing swap is in the opposite direction and pays in the other currency,
+        // and the currency invariant reverted the swap — every swap in that direction,
+        // until expiry. afterSwap's sign-flip rule only sees swaps, so it never fired.
+        // The dislocation this gap tracked is gone; close it and start over below.
+        if (idx != 0 && gapBefore != 0 && (gapBefore > 0) != _gaps[id][idx].gapPositive) {
             _closeGap(id, idx);
             idx = 0;
         }
@@ -601,16 +650,10 @@ contract BackdraftHook is IHooks, IUnlockCallback {
             surcharge = DivergenceMath.clampToEscrow(scaled, notional);
         }
 
-        // The discount is a property of DIRECTION, not of surcharge size. A narrowing
-        // swap whose surcharge rounds to zero is still corrective flow and still gets
-        // the cheaper fee; withholding it here would make the incentive fire only on
-        // large gaps, which is exactly where correction already pays for itself.
         if (surcharge == 0) {
-            return (
-                IHooks.beforeSwap.selector,
-                BeforeSwapDeltaLibrary.ZERO_DELTA,
-                _narrowingFeeOverride(key.fee, c.narrowingFee)
-            );
+            // No surcharge, no discount (R4): the flip is funded by the surcharge on
+            // this same swap, and a zero surcharge funds nothing.
+            return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
         }
 
         // Escrow is ALWAYS taken in the input currency, for both swap types. This is
@@ -629,6 +672,13 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         // interleaving can observe a minted balance the gap does not yet account for.
         if (gp.escrowed == 0) {
             gp.isCurrency0 = params.zeroForOne;
+            // First escrow fixes the currency; anything swept from earlier gaps in this
+            // currency now has an age-filtered claimant set to go to.
+            uint128 carry = pendingCarry[id][params.zeroForOne ? 1 : 0];
+            if (carry != 0) {
+                pendingCarry[id][params.zeroForOne ? 1 : 0] = 0;
+                gp.lpCarry = carry;
+            }
         } else if (gp.isCurrency0 != params.zeroForOne) {
             revert EscrowCurrencyMismatch(id, idx);
         }
@@ -645,7 +695,8 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         // returns 0 there — a widener, a swap with no gap open, and a frozen reference
         // all pay the pool's normal fee. Only a swap that closes an open gap is
         // discounted, and it is the same swap paying the surcharge.
-        uint24 feeOverride = _narrowingFeeOverride(key.fee, c.narrowingFee);
+        uint24 feeOverride =
+            _narrowingFeeOverride(key.fee, c.baseFee, c.narrowingFee, surcharge, notional);
 
         return exactInput
             ? (IHooks.beforeSwap.selector, toBeforeSwapDelta(int128(surcharge), 0), feeOverride)
@@ -776,8 +827,13 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         if (openGapIdx[id] == gapIdx) openGapIdx[id] = 0;
 
         uint256 tp = _traderPot(id, g);
-        uint256 lp = g.escrowed - tp;
+        uint256 lp = _lpPot(g, tp);
         emit Settled(id, gapIdx, tp, lp);
+    }
+
+    /// @dev LP pot: what is escrowed and not owed to traders, plus any carried remainder.
+    function _lpPot(Gap storage g, uint256 traderPot) internal view returns (uint256) {
+        return uint256(g.escrowed) - traderPot + uint256(g.lpCarry);
     }
 
     /// @notice v4 settlement: trader pot scaled by the fraction of the gap the ledger explains.
@@ -793,7 +849,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
              / (uint256(g.maxAbsGap) * 10_000);
     }
 
-    /// @notice Return a settled gap's unclaimed remainder to the pool's LPs.
+    /// @notice Move a settled gap's unclaimed remainder to the next gap's LP pot.
     /// @dev    Permissionless, and only after the gap has been settled and expired plus
     ///         a grace period, so eligible claimants have had their window.
     ///
@@ -802,9 +858,11 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     ///         adds, while claims come from individual positions — when the denominator
     ///         exceeds the claimants (out-of-range liquidity at gap open, positions
     ///         added through a non-allowlisted router, LPs who simply never claim) the
-    ///         difference has no owner and no route out. There is no owner withdrawal
-    ///         and no treasury: the remainder is donated back into the pool, which
-    ///         credits current in-range LPs. Nothing here requires trusting the admin.
+    ///         difference has no owner. There is no owner withdrawal and no treasury:
+    ///         the remainder is carried into the LP pot of the next gap that escrows
+    ///         in the same currency (see `pendingCarry`). Nothing here requires
+    ///         trusting the admin, and nothing here pays liquidity that was not old
+    ///         enough at that next gap's open.
     function sweepUnclaimed(PoolId id, uint256 gapIdx) external {
         Gap storage g = _gaps[id][gapIdx];
         require(g.settled, "not settled");
@@ -812,7 +870,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         require(block.number > uint256(g.expiryBlock) + cfg[id].sweepGraceBlocks, "too early");
 
         uint256 traderPot = _traderPot(id, g);
-        uint256 lpPot     = uint256(g.escrowed) - traderPot;
+        uint256 lpPot     = _lpPot(g, traderPot);
         uint256 remainder = (lpPot - uint256(g.lpPaid)) + (traderPot - uint256(g.traderPaid));
         g.swept = true;
         // The pots are now exhausted. Without this a claim arriving AFTER the sweep is
@@ -821,14 +879,9 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         g.traderPaid = uint128(traderPot);
         if (remainder == 0) return;
 
-        Currency cur = g.isCurrency0 ? _currency0[id] : _currency1[id];
+        // The remainder never leaves the hook's ERC-6909 balance; it changes owner.
+        pendingCarry[id][g.isCurrency0 ? 1 : 0] += uint128(remainder);
         emit SweptToLps(id, gapIdx, remainder);
-        // unlock() returns the callback's return data, which is empty by construction:
-        // unlockCallback returns "". Nothing to check.
-        // slither-disable-next-line unused-return
-        poolManager.unlock(abi.encode(PayoutData({
-            currency: cur, to: address(0), amount: remainder, isDonate: true, key: _poolKeys[id]
-        })));
     }
 
     function claimTrader(PoolId id, uint256 gapIdx) external {
@@ -876,7 +929,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         require(EligibilityLib.isEligible(p.addBlock, g.openBlock, cfg[id].minAgeBlocks), "too new");
         require(EligibilityLib.isInRange(p.tickLower, p.tickUpper, g.tickAtOpen), "out of range");
 
-        uint256 lpPot = uint256(g.escrowed) - _traderPot(id, g);
+        uint256 lpPot = _lpPot(g, _traderPot(id, g));
         require(g.eligibleLiqAtOpen > 0, "no eligible liq");
         uint256 owed = (lpPot * uint256(p.liquidity)) / uint256(g.eligibleLiqAtOpen);
 
@@ -958,6 +1011,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
             totalContribution: 0,
             lpPaid:           0,
             traderPaid:       0,
+            lpCarry:          0,
             maxAbsGap:        GapMath.abs(gapNow),
             gapPositive:      gapNow > 0,
             isCurrency0:      false,
@@ -981,7 +1035,8 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         Gap storage g = _gaps[id][idx];
         if (!g.settled) {
             g.settled = true;
-            emit Settled(id, idx, _traderPot(id, g), uint256(g.escrowed) - _traderPot(id, g));
+            uint256 tp = _traderPot(id, g);
+            emit Settled(id, idx, tp, _lpPot(g, tp));
         }
         emit GapClosed(id, idx, g.escrowed);
     }
@@ -1000,10 +1055,8 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     // Encoded payload for unlockCallback — used by claimTrader/claimLp
     struct PayoutData {
         Currency currency;
-        address  to;        // ignored when isDonate
+        address  to;
         uint256  amount;
-        bool     isDonate;  // true => donate to the pool's LPs instead of transferring
-        PoolKey  key;       // only used when isDonate
     }
 
     /// @notice IUnlockCallback — called back by PoolManager during claim payouts.
@@ -1013,22 +1066,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         require(msg.sender == address(poolManager), "not PM");
         PayoutData memory p = abi.decode(data, (PayoutData));
         poolManager.burn(address(this), p.currency.toId(), p.amount);
-        if (p.isDonate) {
-            // Return the remainder to the pool's current LPs rather than to an admin.
-            // donate() credits in-range liquidity directly, so unclaimed LP capture goes
-            // back to LPs — no treasury, no owner discretion, nothing to trust.
-            bool zero = Currency.unwrap(p.currency) == Currency.unwrap(p.key.currency0);
-            // donate() returns the delta it created. We do not read it because the
-            // burn above already produced the offsetting negative delta for exactly
-            // p.amount, and the PoolManager reverts on unlock if the two do not sum
-            // to zero — the settlement check is stronger than any assertion we could
-            // write here. donate reverts outright if the pool has no in-range
-            // liquidity, which is the case where the remainder has nowhere to go.
-            // slither-disable-next-line unused-return
-            poolManager.donate(p.key, zero ? p.amount : 0, zero ? 0 : p.amount, "");
-        } else {
-            poolManager.take(p.currency, p.to, p.amount);
-        }
+        poolManager.take(p.currency, p.to, p.amount);
         return "";
     }
 
@@ -1038,9 +1076,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         // burn+take require an unlock context; claim functions are called outside swaps.
         // unlock() returns unlockCallback's return data, which is "" by construction.
         // slither-disable-next-line unused-return
-        poolManager.unlock(abi.encode(PayoutData({
-            currency: cur, to: to, amount: amount, isDonate: false, key: _poolKeys[id]
-        })));
+        poolManager.unlock(abi.encode(PayoutData({currency: cur, to: to, amount: amount})));
     }
 
     function _contributionKey(PoolId id, uint256 gapIdx, address addr) internal pure returns (bytes32) {

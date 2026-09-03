@@ -140,7 +140,8 @@ contract PayoutCapTest is BackdraftTestBase {
     // The sweep
     // ------------------------------------------------------------------
 
-    /// @notice Unclaimed remainder returns to LPs, and only after expiry plus grace.
+    /// @notice Unclaimed remainder is carried to the next gap's LP pot, and only after
+    ///         expiry plus grace.
     function test_SweepReturnsRemainderAfterGrace() public {
         _addLiquidity(LP_A, LO, HI, 10_000_000e18);
         vm.roll(block.number + minAgeBlocks + 1);
@@ -156,10 +157,15 @@ contract PayoutCapTest is BackdraftTestBase {
         vm.prank(ANYONE, ANYONE);
         hook.sweepUnclaimed(poolId, idx);
 
-        assertLt(
+        // The remainder stays in the hook and is re-owned by the next gap (R2): the
+        // balance does not move, the carry does.
+        assertEq(
             _hookBalance(g.isCurrency0 ? poolKey.currency0 : poolKey.currency1), hookBefore,
-            "sweep must move the remainder out of the hook"
+            "sweep must not move funds out of the hook"
         );
+        uint256 expected = uint256(g.escrowed) - g.lpPaid - g.traderPaid;
+        assertEq(hook.pendingCarry(poolId, g.isCurrency0 ? 1 : 0), expected,
+            "the whole remainder is carried");
         assertTrue(hook.gapAt(poolId, idx).swept, "gap must be marked swept");
     }
 

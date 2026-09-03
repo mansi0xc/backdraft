@@ -55,6 +55,45 @@ contract ReferenceGuardTest is Test {
     }
 
     // ------------------------------------------------------------------
+    // invertTicks — the one config bit that decides whether a native-ETH/USDC v4 pool
+    // reads a ~400,000-tick phantom gap against the USDC/WETH v3 reference. It had no
+    // test at all (review 2026-09-03).
+    // ------------------------------------------------------------------
+
+    function test_InvertTicksNegatesTheReference() public {
+        fast.setTick(-200_000);
+        deep.setTick(-200_000);
+        deep.setCumulatives(0, int56(int256(-200_000) * int256(uint256(WINDOW))));
+
+        (int24 plain, bool ok1,) = ref.getRefTick(ID);
+        assertTrue(ok1);
+        assertEq(plain, -200_000, "not inverted: v3 tick as-is");
+
+        ref.setConfig(ID, SplitV3Reference.Config({
+            fastPool: address(fast), deepPool: address(deep), twapWindow: WINDOW,
+            guardMaxDevTicks: MAX_DEV, freezeMaxDevTicks: FREEZE_DEV, invertTicks: true
+        }));
+        (int24 inv, bool ok2, uint24 div) = ref.getRefTick(ID);
+        assertTrue(ok2);
+        assertEq(inv, 200_000, "inverted: sign flipped for a reversed token order");
+        assertEq(div, 0, "divergence is order-independent");
+    }
+
+    /// @notice Divergence is computed in the v3 frame BEFORE inversion, so it must be
+    ///         identical either way — a sign flip must not manufacture disagreement.
+    function test_InvertTicksDoesNotChangeDivergence() public {
+        fast.setTick(1080);   // 80 ticks off the deep pool
+        (,, uint24 d1) = ref.getRefTick(ID);
+        ref.setConfig(ID, SplitV3Reference.Config({
+            fastPool: address(fast), deepPool: address(deep), twapWindow: WINDOW,
+            guardMaxDevTicks: MAX_DEV, freezeMaxDevTicks: FREEZE_DEV, invertTicks: true
+        }));
+        (,, uint24 d2) = ref.getRefTick(ID);
+        assertEq(d1, 80);
+        assertEq(d2, 80);
+    }
+
+    // ------------------------------------------------------------------
     // R1 — freeze, never revert
     // ------------------------------------------------------------------
 
