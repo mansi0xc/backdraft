@@ -37,13 +37,13 @@ const KIND_LABEL: Record<Kind, string> = {
 const NODES: NodeDef[] = [
   { id: 1, x: 0, y: 130, w: 208, h: 90, kind: "src", title: "v3 0.01%", sub: ["fast spot", "the reference"] },
   { id: 2, x: 0, y: 330, w: 208, h: 90, kind: "src", title: "v3 0.05%", sub: ["deep spot + 30m TWAP", "the guard"] },
-  { id: 3, x: 288, y: 230, w: 234, h: 92, kind: "src", title: "SplitV3Reference", sub: ["getRefTick to (tick, ok)", "ok = false freezes the hook"] },
+  { id: 3, x: 288, y: 230, w: 234, h: 92, kind: "src", title: "SplitV3Reference", sub: ["getRefTick → (tick, ok, divTicks)", "ok=false freezes · divTicks → graduated ×"] },
   { id: 4, x: 600, y: 60, w: 226, h: 102, kind: "hook", title: "beforeSwap", fire: true, sub: ["classify narrowing", "open gap, mint surcharge"] },
-  { id: 5, x: 600, y: 350, w: 226, h: 102, kind: "hook", title: "afterSwap", fire: true, sub: ["delta gap, credit tx.origin", "raise maxAbsGap, close gap"] },
+  { id: 5, x: 600, y: 350, w: 226, h: 102, kind: "hook", title: "afterSwap", fire: true, sub: ["delta gap, credit via hookData", "raise maxAbsGap, close gap"] },
   { id: 6, x: 906, y: 50, w: 218, h: 90, kind: "state", title: "PoolManager", sub: ["ERC-6909 escrow", "BeforeSwapDelta from swapper"] },
   { id: 7, x: 906, y: 280, w: 218, h: 98, kind: "state", title: "Gap ledger", sub: ["contribution, totalContribution", "maxAbsGap, escrowed"] },
   { id: 8, x: 1204, y: 165, w: 226, h: 102, kind: "hook", title: "settle()", fire: true, sub: ["explained = min(ledger / peak, 1)", "traderPot, lpPot"] },
-  { id: 9, x: 1204, y: 370, w: 236, h: 98, kind: "hook", title: "claimTrader / claimLp", sub: ["pro rata, age + duration filter", "sum claimable <= balance"] },
+  { id: 9, x: 1204, y: 370, w: 236, h: 98, kind: "hook", title: "claimTrader / claimLp", sub: ["pro rata by liquidity, age gate", "sum claimable <= balance"] },
   { id: 10, x: 1510, y: 268, w: 198, h: 90, kind: "out", title: "Traders + LPs", sub: ["_payout", "IUnlockCallback"] },
 ];
 
@@ -51,7 +51,7 @@ type EdgeDef = { from: number; to: number; label: string };
 const EDGES: EdgeDef[] = [
   { from: 1, to: 3, label: "spot tick" },
   { from: 2, to: 3, label: "TWAP guard" },
-  { from: 3, to: 4, label: "refTick + ok" },
+  { from: 3, to: 4, label: "refTick + ok + divTicks" },
   { from: 4, to: 6, label: "mint surcharge" },
   { from: 4, to: 7, label: "open gap" },
   { from: 5, to: 7, label: "credit + maxAbsGap" },
@@ -68,11 +68,11 @@ const STEPS: Step[] = [
   { nodes: [1, 2, 3], edges: ["1-3", "2-3"], cap: "Two v3 pools feed the price. The deep pool guards the fast one against manipulation." },
   { nodes: [3, 4], edges: ["3-4"], cap: "beforeSwap reads getRefTick. If ok is false the reference is unreliable and the hook freezes here, no credit, no surcharge." },
   { nodes: [4, 7], edges: ["4-7"], cap: "Gap already past 65 ticks and none open: beforeSwap opens the gap with an empty ledger.", fire: true },
-  { nodes: [5, 7], edges: ["5-7"], cap: "A widening swap. afterSwap credits tx.origin by the ticks it added and raises maxAbsGap." },
+  { nodes: [5, 7], edges: ["5-7"], cap: "A widening swap. afterSwap credits the address named in hookData (resolveUser) by the ticks it added and raises maxAbsGap." },
   { nodes: [4, 6], edges: ["4-6"], cap: "A narrowing swap. beforeSwap mints an ERC-6909 surcharge priced on the peak gap, so splitting the close saves nothing.", fire: true },
   { nodes: [5, 7], edges: ["5-7"], cap: "The closing swap pulls back or overshoots the reference. afterSwap closes the gap.", fire: true },
   { nodes: [6, 7, 8], edges: ["6-8", "7-8"], cap: "settle: explained = min(totalContribution / maxAbsGap, 1). traderPot = escrowed x alpha x explained. An empty ledger sends everything to LPs with no branch.", fire: true },
-  { nodes: [8, 9, 10], edges: ["8-9", "9-10"], cap: "Pull claims. LPs filtered by age, top-up resets the clock, duration weighting separates a seasoned LP from a one-block bot. Solvency asserted every step." },
+  { nodes: [8, 9, 10], edges: ["8-9", "9-10"], cap: "Pull claims. LPs filtered by age gate (minAgeBlocks, top-up resets the clock) and paid pro rata by liquidity size. Solvency asserted every step." },
 ];
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
