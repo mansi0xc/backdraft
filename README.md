@@ -59,7 +59,7 @@ ETHERSCAN_API_KEY=YOUR_KEY
 
 ## Running Tests
 
-236 tests across 27 suites. Everything except the fork suite runs without an RPC.
+237 tests across 27 suites. Everything except the fork suite runs without an RPC.
 Every test asserts. The gas table and the parameter sweep print their tables and then
 check them: gas against per-path ceilings measured relative to a hookless control pool,
 the sweep against the monotonicity its parameters are supposed to have.
@@ -176,7 +176,7 @@ unconfigured, or `observe()` unavailable.
 | deep tick | 198092 |
 | fast−deep | 2 ticks |
 | deep spot−TWAP | 21 ticks |
-| `getRefTick` gas | 74,307 |
+| `getRefTick` gas | 66k-77k (measured on mainnet, `ReplayForkTest`; varies with the deep pool's observation array) |
 
 ### Gas
 
