@@ -1,0 +1,161 @@
+.wrap {
+  position: relative;
+  margin-top: 2rem;
+  border: 1px solid var(--line);
+  background:
+    radial-gradient(circle at 1px 1px, rgba(243, 236, 224, 0.05) 1px, transparent 0)
+      0 0 / 26px 26px,
+    linear-gradient(180deg, var(--ink-raise), var(--ink));
+  height: clamp(400px, 56vh, 520px);
+  overflow: hidden;
+  touch-action: none;
+}
+
+.svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+}
+.svg.grabbing { cursor: grabbing; }
+
+.edge {
+  fill: none;
+  stroke: var(--ash);
+  stroke-width: 1.25;
+  transition: stroke 0.3s, stroke-width 0.3s, opacity 0.3s;
+}
+.edgeHot {
+  stroke: var(--ember);
+  stroke-width: 2;
+}
+.edgeLabel {
+  font-family: var(--font-sans), sans-serif;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  fill: var(--cream-dim);
+}
+.edgeLabelBg { fill: var(--ink); }
+
+.node > rect {
+  fill: var(--ink);
+  stroke: var(--line);
+  stroke-width: 1;
+  transition: stroke 0.3s, fill 0.3s;
+}
+.node { cursor: grab; }
+.node:active { cursor: grabbing; }
+.node.hot > rect { stroke: var(--ember); fill: color-mix(in oklab, var(--ember), transparent 92%); }
+.node.fire > rect { stroke: var(--line-ember); }
+.node.fire.hot > rect {
+  stroke: var(--flame);
+  fill: color-mix(in oklab, var(--flame), transparent 90%);
+}
+
+.nTitle {
+  font-family: var(--font-serif), Georgia, serif;
+  font-size: 17px;
+  fill: var(--cream);
+}
+.nKind {
+  font-family: var(--font-sans), sans-serif;
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  fill: var(--ember);
+}
+.nKind.fireTag { fill: var(--flame); }
+.nSub {
+  font-family: var(--font-sans), sans-serif;
+  font-size: 11.5px;
+  fill: var(--cream-dim);
+}
+
+.dot {
+  fill: var(--flame);
+}
+
+/* controls */
+.controls {
+  position: absolute;
+  top: 0.8rem;
+  right: 0.8rem;
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+.btn {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: color-mix(in oklab, var(--ink), transparent 15%);
+  backdrop-filter: blur(6px);
+  color: var(--cream-dim);
+  font-family: var(--font-sans), sans-serif;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.5rem 0.7rem;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s, background 0.2s;
+  line-height: 1;
+}
+.btn:hover { color: var(--cream); border-color: var(--ember); }
+.btnW { min-width: 2.2rem; text-align: center; }
+.btnPrimary { color: var(--ink); background: var(--ember); border-color: var(--ember); }
+.btnPrimary:hover { color: var(--ink); background: var(--cream); border-color: var(--cream); }
+
+.zoomRead {
+  font-family: var(--font-sans), sans-serif;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.7rem;
+  color: var(--ash);
+  min-width: 3ch;
+  text-align: center;
+}
+
+.hint {
+  position: absolute;
+  left: 0.9rem;
+  top: 0.9rem;
+  font-family: var(--font-sans), sans-serif;
+  font-size: 0.68rem;
+  letter-spacing: 0.03em;
+  color: var(--ash);
+  max-width: 15rem;
+  line-height: 1.4;
+  pointer-events: none;
+}
+
+.cap {
+  position: absolute;
+  left: 0.9rem;
+  right: 0.9rem;
+  bottom: 0.9rem;
+  border: 1px solid var(--line-ember);
+  background: color-mix(in oklab, var(--ink), transparent 8%);
+  backdrop-filter: blur(8px);
+  padding: 0.85rem 1rem;
+  display: flex;
+  gap: 1rem;
+  align-items: baseline;
+}
+.capStep {
+  font-family: var(--font-sans), sans-serif;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  color: var(--flame);
+  flex: none;
+}
+.capText {
+  font-family: var(--font-serif), Georgia, serif;
+  font-size: 0.98rem;
+  line-height: 1.4;
+  color: var(--cream);
+}
+
+@media (max-width: 640px) {
+  .hint { display: none; }
+  .cap { flex-direction: column; gap: 0.3rem; }
+  .capText { font-size: 0.9rem; }
+}

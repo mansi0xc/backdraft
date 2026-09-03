@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "backdraft-ui",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "/Users/rosk/Downloads/uhi10/ui", "run", "dev"],
+      "port": 3000
+    }
+  ]
+}
