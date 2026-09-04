@@ -15,7 +15,9 @@ invariant = { runs = 128, depth = 80, fail_on_revert = true }   # depth 80 reach
 
 [rpc_endpoints]
 mainnet = "${MAINNET_RPC_URL}"
+sepolia = "${SEPOLIA_RPC_URL}"
 
 [etherscan]
 mainnet = { key = "${ETHERSCAN_API_KEY}" }
+sepolia = { key = "${ETHERSCAN_API_KEY}", chain = 11155111 }
 
