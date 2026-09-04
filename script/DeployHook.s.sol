@@ -15,7 +15,7 @@ import {IReferencePrice}    from "../src/interfaces/IReferencePrice.sol";
 /// Usage:
 ///   forge script script/DeployHook.s.sol:DeployHook --rpc-url $RPC_URL --broadcast
 ///
-/// Required env (see .env.example): PRIVATE_KEY
+/// Required env (see .env): PRIVATE_KEY, and for local/sepolia see NetworkConfig below
 ///
 /// After deployment THREE things must happen before the hook does anything useful.
 /// They are printed at the end of the run because every one of them fails silently:
@@ -47,8 +47,11 @@ contract DeployHook is Script {
         if (block.chainid == 11155111) {
             return NetworkConfig({
                 poolManager: 0xE03A1074c86CFeDd5C142C4F04F1a1536e203543,
-                fastPool:    address(0),   // set before configuring a pool on Sepolia
-                deepPool:    address(0),
+                // No canonical high-volume v3 reference pool exists on Sepolia, so these
+                // are NOT hardcoded like mainnet's. Pass your own (mock or real) testnet
+                // reference pool addresses via env, same pattern as the local branch.
+                fastPool:    vm.envOr("FAST_POOL", address(0)),
+                deepPool:    vm.envOr("DEEP_POOL", address(0)),
                 name:        "sepolia"
             });
         }
