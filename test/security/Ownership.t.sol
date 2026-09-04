@@ -50,7 +50,7 @@ contract OwnershipTest is BackdraftTestBase {
 
         // The nominee has no powers yet.
         vm.prank(ALICE);
-        vm.expectRevert("not owner");
+        vm.expectRevert(BackdraftHook.NotOwner.selector);
         hook.setRouterAllowed(BOB, true);
     }
 
@@ -67,7 +67,7 @@ contract OwnershipTest is BackdraftTestBase {
         hook.setRouterAllowed(BOB, true);
         assertTrue(hook.allowedRouters(BOB));
 
-        vm.expectRevert("not owner");
+        vm.expectRevert(BackdraftHook.NotOwner.selector);
         hook.setRouterAllowed(BOB, false);
     }
 
@@ -77,10 +77,10 @@ contract OwnershipTest is BackdraftTestBase {
         hook.proposeOwner(ALICE);
 
         vm.prank(BOB);
-        vm.expectRevert("not pending owner");
+        vm.expectRevert(BackdraftHook.NotPendingOwner.selector);
         hook.acceptOwner();
 
-        vm.expectRevert("not pending owner");
+        vm.expectRevert(BackdraftHook.NotPendingOwner.selector);
         hook.acceptOwner();   // not even the current owner
 
         assertEq(hook.owner(), address(this), "owner unchanged after failed accepts");
@@ -88,7 +88,7 @@ contract OwnershipTest is BackdraftTestBase {
 
     function test_AcceptWithNoProposalReverts() public {
         vm.prank(ALICE);
-        vm.expectRevert("not pending owner");
+        vm.expectRevert(BackdraftHook.NotPendingOwner.selector);
         hook.acceptOwner();
     }
 
@@ -99,25 +99,25 @@ contract OwnershipTest is BackdraftTestBase {
         assertEq(hook.pendingOwner(), BOB, "second proposal replaces the first");
 
         vm.prank(ALICE);
-        vm.expectRevert("not pending owner");
+        vm.expectRevert(BackdraftHook.NotPendingOwner.selector);
         hook.acceptOwner();
 
         hook.proposeOwner(address(0));
         assertEq(hook.pendingOwner(), address(0), "zero cancels");
 
         vm.prank(BOB);
-        vm.expectRevert("not pending owner");
+        vm.expectRevert(BackdraftHook.NotPendingOwner.selector);
         hook.acceptOwner();
     }
 
     function test_NonOwnerCannotPropose() public {
         vm.prank(ALICE);
-        vm.expectRevert("not owner");
+        vm.expectRevert(BackdraftHook.NotOwner.selector);
         hook.proposeOwner(ALICE);
     }
 
     function test_ProposingCurrentOwnerReverts() public {
-        vm.expectRevert("already owner");
+        vm.expectRevert(BackdraftHook.AlreadyOwner.selector);
         hook.proposeOwner(address(this));
     }
 
@@ -128,7 +128,7 @@ contract OwnershipTest is BackdraftTestBase {
         hook.acceptOwner();
 
         vm.prank(ALICE);
-        vm.expectRevert("not pending owner");
+        vm.expectRevert(BackdraftHook.NotPendingOwner.selector);
         hook.acceptOwner();
     }
 
@@ -137,7 +137,7 @@ contract OwnershipTest is BackdraftTestBase {
         hook.proposeOwner(ALICE);
 
         vm.prank(caller);
-        vm.expectRevert("not pending owner");
+        vm.expectRevert(BackdraftHook.NotPendingOwner.selector);
         hook.acceptOwner();
         assertEq(hook.owner(), address(this));
     }
@@ -170,7 +170,7 @@ contract OwnershipTest is BackdraftTestBase {
     /// @notice A zero oracle would not revert — every swap would take the frozen path
     ///         and the hook would go quietly inert. Refuse it at the setter.
     function test_SetReferenceOracleRejectsZero() public {
-        vm.expectRevert("oracle is zero");
+        vm.expectRevert(BackdraftHook.OracleIsZero.selector);
         hook.setReferenceOracle(IReferencePrice(address(0)));
     }
 
@@ -185,9 +185,9 @@ contract OwnershipTest is BackdraftTestBase {
 
     function test_NonOwnerCannotSetOracleOrCfg() public {
         vm.startPrank(ALICE);
-        vm.expectRevert("not owner");
+        vm.expectRevert(BackdraftHook.NotOwner.selector);
         hook.setReferenceOracle(IReferencePrice(address(oracle)));
-        vm.expectRevert("not owner");
+        vm.expectRevert(BackdraftHook.NotOwner.selector);
         hook.setPoolCfg(poolId, _defaultCfg());
         vm.stopPrank();
     }
@@ -214,13 +214,13 @@ contract OwnershipTest is BackdraftTestBase {
         ref.proposeOwner(ALICE);
 
         vm.prank(BOB);
-        vm.expectRevert("not pending owner");
+        vm.expectRevert(SplitV3Reference.NotPendingOwner.selector);
         ref.acceptOwner();
         assertEq(ref.owner(), address(this));
     }
 
     function test_OracleRejectsZeroOwnerAtDeploy() public {
-        vm.expectRevert("owner is zero");
+        vm.expectRevert(SplitV3Reference.OwnerIsZero.selector);
         new SplitV3Reference(address(0));
     }
 

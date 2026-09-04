@@ -146,7 +146,7 @@ contract ExogenousTest is BackdraftTestBase {
         // empty, so there is no trader pot at all — a stronger statement than "this
         // particular caller has no credit in it".
         vm.prank(VIK, VIK);
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "n/a"));
+        vm.expectRevert(BackdraftHook.NotApplicable.selector);
         hook.claimTrader(poolId, idx);
     }
 

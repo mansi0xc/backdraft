@@ -157,7 +157,7 @@ contract LpEligibilityTest is BackdraftTestBase {
 
         uint256 idx = _cycleGap();
         vm.prank(ATTACKER, ATTACKER);
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "too new"));
+        vm.expectRevert(BackdraftHook.TooNew.selector);
         hook.claimLp(poolId, idx, LO, HI, bytes32(0));
     }
 

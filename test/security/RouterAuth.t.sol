@@ -120,7 +120,7 @@ contract RouterAuthTest is BackdraftTestBase {
         if (!hook.gapAt(poolId, idx).settled) hook.settle(poolId, idx);
 
         vm.prank(BUNDLER, BUNDLER);
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "nothing"));
+        vm.expectRevert(BackdraftHook.NothingToClaim.selector);
         hook.claimTrader(poolId, idx);
 
         uint256 before = token0.balanceOf(ACCOUNT) + token1.balanceOf(ACCOUNT);
@@ -217,7 +217,7 @@ contract RouterAuthTest is BackdraftTestBase {
 
     function test_OnlyOwnerCanAllowlist() public {
         vm.prank(VIK, VIK);
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "not owner"));
+        vm.expectRevert(BackdraftHook.NotOwner.selector);
         hook.setRouterAllowed(address(untrustedRouter), true);
     }
 

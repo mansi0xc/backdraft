@@ -163,7 +163,7 @@ contract AttributionTest is BackdraftTestBase {
         uint256 vBefore0 = token0.balanceOf(VIK);
         uint256 vBefore1 = token1.balanceOf(VIK);
         vm.prank(VIK, VIK);
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "nothing"));
+        vm.expectRevert(BackdraftHook.NothingToClaim.selector);
         hook.claimTrader(poolId, idx);
         assertEq(token0.balanceOf(VIK), vBefore0, "arbitrageur must gain no currency0");
         assertEq(token1.balanceOf(VIK), vBefore1, "arbitrageur must gain no currency1");

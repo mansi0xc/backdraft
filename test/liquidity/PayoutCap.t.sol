@@ -175,7 +175,7 @@ contract PayoutCapTest is BackdraftTestBase {
         uint256 idx = _cycleGap();
 
         vm.prank(ANYONE, ANYONE);
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "too early"));
+        vm.expectRevert(BackdraftHook.TooEarly.selector);
         hook.sweepUnclaimed(poolId, idx);
     }
 
@@ -189,7 +189,7 @@ contract PayoutCapTest is BackdraftTestBase {
         hook.sweepUnclaimed(poolId, idx);
 
         vm.prank(ANYONE, ANYONE);
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "swept"));
+        vm.expectRevert(BackdraftHook.AlreadySwept.selector);
         hook.sweepUnclaimed(poolId, idx);
     }
 

@@ -216,6 +216,36 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     ///         so a trace says which invariant broke.
     error EscrowCurrencyMismatch(PoolId id, uint256 gapIdx);
 
+    // Replace require(cond, "string") reverts below with named errors — same checks,
+    // same call sites, no behavior change. One error per distinct former message;
+    // messages that were reused verbatim at multiple require() sites (e.g. "not PM",
+    // "swept", "not settled") share a single error below, exactly as they shared a
+    // single string before.
+    error OwnerIsZero();
+    error NotOwner();
+    error AlreadyOwner();
+    error NotPendingOwner();
+    error NarrowingFeeTooHigh();
+    error BaseFeeTooHigh();
+    error TraderShareTooHigh();
+    error SurchargeCapTooHigh();
+    error ThresholdIsZero();
+    error NarrowingFeeAboveBaseFee();
+    error OracleIsZero();
+    error NotPoolManager();
+    error AlreadySettled();
+    error GapStillOpen();
+    error NotSettled();
+    error AlreadySwept();
+    error TooEarly();
+    error NotApplicable();
+    error NothingToClaim();
+    error AlreadyClaimed();
+    error NoPosition();
+    error TooNew();
+    error OutOfRange();
+    error NoEligibleLiquidity();
+
     /// @notice Remainder of `gapIdx` moved to `pendingCarry` for the next gap's LP pot.
     event SweptToLps(PoolId indexed id, uint256 gapIdx, uint256 amount);
     event RouterAllowed(address indexed router, bool allowed);
@@ -246,7 +276,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         // silently never receives beforeSwap — discovered live, not in tests.
         Hooks.validateHookPermissions(this, getHookPermissions());
 
-        require(_owner != address(0), "owner is zero");
+        if (_owner == address(0)) revert OwnerIsZero();
         owner = _owner;
         emit OwnerTransferred(address(0), _owner);
     }
@@ -292,14 +322,14 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     address public pendingOwner;
 
     modifier onlyOwner() {
-        require(msg.sender == owner, "not owner");
+        if (msg.sender != owner) revert NotOwner();
         _;
     }
 
     /// @notice Nominate the next owner. Nothing changes until they accept.
     ///         Pass address(0) to cancel an outstanding proposal.
     function proposeOwner(address newOwner) external onlyOwner {
-        require(newOwner != owner, "already owner");
+        if (newOwner == owner) revert AlreadyOwner();
         pendingOwner = newOwner;
         emit OwnerProposed(owner, newOwner);
     }
@@ -307,7 +337,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     /// @notice Accept a pending nomination. Only the nominated address can call it,
     ///         which is what proves the new owner controls the key.
     function acceptOwner() external {
-        require(msg.sender == pendingOwner, "not pending owner");
+        if (msg.sender != pendingOwner) revert NotPendingOwner();
         address previous = owner;
         owner = pendingOwner;
         pendingOwner = address(0);
@@ -317,25 +347,23 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     function setPoolCfg(PoolId id, PoolCfg calldata c) external onlyOwner {
         // A fee above MAX_LP_FEE is rejected by v4 at swap time, which would revert every
         // narrowing swap in the pool rather than failing here where it can be seen.
-        require(
-            c.narrowingFee == NO_FEE_OVERRIDE || c.narrowingFee <= LPFeeLibrary.MAX_LP_FEE,
-            "narrowingFee > max"
-        );
-        require(c.baseFee <= LPFeeLibrary.MAX_LP_FEE, "baseFee > max");
+        if (!(c.narrowingFee == NO_FEE_OVERRIDE || c.narrowingFee <= LPFeeLibrary.MAX_LP_FEE)) {
+            revert NarrowingFeeTooHigh();
+        }
+        if (c.baseFee > LPFeeLibrary.MAX_LP_FEE) revert BaseFeeTooHigh();
         // traderShareBps > 100% makes _traderPot exceed escrow, which underflows in
         // _closeGap and reverts every closing swap. surchargeCapBps > 100% asks for more
         // than the swapper put in, which v4 rejects as HookDeltaExceedsSwapAmount.
-        require(c.traderShareBps <= 10_000, "traderShare > 100%");
-        require(c.surchargeCapBps <= 10_000, "surchargeCap > 100%");
-        require(c.gapThresholdTicks > 0, "threshold is zero");
+        if (c.traderShareBps > 10_000) revert TraderShareTooHigh();
+        if (c.surchargeCapBps > 10_000) revert SurchargeCapTooHigh();
+        if (c.gapThresholdTicks == 0) revert ThresholdIsZero();
         // The flip is funded by the surcharge taken from the same swap. A discount is
         // only coherent if it is a discount: charging correcting flow MORE than the
         // pool's normal fee inverts the mechanism into a second tax on the arbitrage
         // that fixes the price.
-        require(
-            c.narrowingFee == NO_FEE_OVERRIDE || c.narrowingFee <= c.baseFee,
-            "narrowingFee > baseFee"
-        );
+        if (!(c.narrowingFee == NO_FEE_OVERRIDE || c.narrowingFee <= c.baseFee)) {
+            revert NarrowingFeeAboveBaseFee();
+        }
         cfg[id] = c;
         emit PoolCfgSet(id, c);
 
@@ -361,7 +389,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     ///         large they are — so it is logged, and the zero address is refused
     ///         because it would make every swap take the frozen path silently.
     function setReferenceOracle(IReferencePrice oracle) external onlyOwner {
-        require(address(oracle) != address(0), "oracle is zero");
+        if (address(oracle) == address(0)) revert OracleIsZero();
         address previous = address(referenceOracle);
         referenceOracle = oracle;
         emit ReferenceOracleSet(previous, address(oracle));
@@ -376,7 +404,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         override
         returns (bytes4)
     {
-        require(msg.sender == address(poolManager), "not PM");
+        if (msg.sender != address(poolManager)) revert NotPoolManager();
         PoolId id = key.toId();
         // Store currencies for payout — needed by _payout since we only have PoolId there
         _poolKeys[id]  = key;
@@ -411,7 +439,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         IPoolManager.ModifyLiquidityParams calldata params,
         bytes calldata hookData
     ) external override returns (bytes4) {
-        require(msg.sender == address(poolManager), "not PM");
+        if (msg.sender != address(poolManager)) revert NotPoolManager();
         PoolId id = key.toId();
         address lp = _resolveUser(sender, hookData);
         if (lp == sender && !allowedRouters[sender]) emit UnattributedAction(id, sender);
@@ -440,7 +468,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         IPoolManager.ModifyLiquidityParams calldata params,
         bytes calldata hookData
     ) external override returns (bytes4) {
-        require(msg.sender == address(poolManager), "not PM");
+        if (msg.sender != address(poolManager)) revert NotPoolManager();
         PoolId id = key.toId();
         bytes32 pk = _positionKey(
             id, _resolveUser(sender, hookData), params.tickLower, params.tickUpper, params.salt
@@ -513,7 +541,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         IPoolManager.SwapParams calldata params,
         bytes calldata hookData
     ) external override returns (bytes4, BeforeSwapDelta, uint24) {
-        require(msg.sender == address(poolManager), "not PM");
+        if (msg.sender != address(poolManager)) revert NotPoolManager();
         PoolId id = key.toId();
         PoolCfg storage c = cfg[id];
 
@@ -723,7 +751,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         BalanceDelta,
         bytes calldata hookData
     ) external override returns (bytes4, int128) {
-        require(msg.sender == address(poolManager), "not PM");
+        if (msg.sender != address(poolManager)) revert NotPoolManager();
         PoolId id = key.toId();
         PoolCfg storage c = cfg[id];
 
@@ -825,11 +853,10 @@ contract BackdraftHook is IHooks, IUnlockCallback {
 
     function settle(PoolId id, uint256 gapIdx) public {
         Gap storage g = _gaps[id][gapIdx];
-        require(!g.settled, "already settled");
-        require(
-            block.number > g.expiryBlock || !_isGapOpen(id, gapIdx),
-            "still open"
-        );
+        if (g.settled) revert AlreadySettled();
+        if (!(block.number > g.expiryBlock || !_isGapOpen(id, gapIdx))) {
+            revert GapStillOpen();
+        }
         g.settled = true;
         // If this gap expired while still marked open, clear the pointer so
         // openGapIdx never points to a settled gap.
@@ -874,9 +901,9 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     ///         enough at that next gap's open.
     function sweepUnclaimed(PoolId id, uint256 gapIdx) external {
         Gap storage g = _gaps[id][gapIdx];
-        require(g.settled, "not settled");
-        require(!g.swept, "swept");
-        require(block.number > uint256(g.expiryBlock) + cfg[id].sweepGraceBlocks, "too early");
+        if (!g.settled) revert NotSettled();
+        if (g.swept) revert AlreadySwept();
+        if (block.number <= uint256(g.expiryBlock) + cfg[id].sweepGraceBlocks) revert TooEarly();
 
         uint256 traderPot = _traderPot(id, g);
         uint256 lpPot     = _lpPot(g, traderPot);
@@ -895,11 +922,11 @@ contract BackdraftHook is IHooks, IUnlockCallback {
 
     function claimTrader(PoolId id, uint256 gapIdx) external {
         Gap storage g = _gaps[id][gapIdx];
-        require(g.settled && g.totalContribution > 0, "n/a");
-        require(!g.swept, "swept");
+        if (!(g.settled && g.totalContribution > 0)) revert NotApplicable();
+        if (g.swept) revert AlreadySwept();
         bytes32 k = _contributionKey(id, gapIdx, msg.sender);
         uint128 c = contribution[k];
-        require(c > 0, "nothing");
+        if (c == 0) revert NothingToClaim();
         contribution[k] = 0;
 
         uint256 owed = (_traderPot(id, g) * c) / g.totalContribution;
@@ -929,17 +956,17 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         bytes32 positionKey = _positionKey(id, msg.sender, tickLower, tickUpper, salt);
 
         Gap storage g = _gaps[id][gapIdx];
-        require(g.settled, "not settled");
-        require(!g.swept, "swept");
-        require(!lpClaimed[positionKey][gapIdx], "claimed");
+        if (!g.settled) revert NotSettled();
+        if (g.swept) revert AlreadySwept();
+        if (lpClaimed[positionKey][gapIdx]) revert AlreadyClaimed();
 
         PositionInfo memory p = positions[positionKey];
-        require(p.liquidity > 0, "no position");
-        require(EligibilityLib.isEligible(p.addBlock, g.openBlock, cfg[id].minAgeBlocks), "too new");
-        require(EligibilityLib.isInRange(p.tickLower, p.tickUpper, g.tickAtOpen), "out of range");
+        if (p.liquidity == 0) revert NoPosition();
+        if (!EligibilityLib.isEligible(p.addBlock, g.openBlock, cfg[id].minAgeBlocks)) revert TooNew();
+        if (!EligibilityLib.isInRange(p.tickLower, p.tickUpper, g.tickAtOpen)) revert OutOfRange();
 
         uint256 lpPot = _lpPot(g, _traderPot(id, g));
-        require(g.eligibleLiqAtOpen > 0, "no eligible liq");
+        if (g.eligibleLiqAtOpen == 0) revert NoEligibleLiquidity();
         uint256 owed = (lpPot * uint256(p.liquidity)) / uint256(g.eligibleLiqAtOpen);
 
         // Cap against what this gap still owes. `eligibleLiqAtOpen` is derived from
@@ -1072,7 +1099,7 @@ contract BackdraftHook is IHooks, IUnlockCallback {
     ///         burn() and take() require the PM to be in an unlocked context.
     ///         Claim functions are called outside swaps, so we must self-unlock.
     function unlockCallback(bytes calldata data) external returns (bytes memory) {
-        require(msg.sender == address(poolManager), "not PM");
+        if (msg.sender != address(poolManager)) revert NotPoolManager();
         PayoutData memory p = abi.decode(data, (PayoutData));
         poolManager.burn(address(this), p.currency.toId(), p.amount);
         poolManager.take(p.currency, p.to, p.amount);

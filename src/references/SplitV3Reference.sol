@@ -58,31 +58,41 @@ contract SplitV3Reference is IReferencePrice {
     event OwnerTransferred(address indexed previousOwner, address indexed newOwner);
     event ConfigSet(PoolId indexed id, Config cfg);
 
+    // Replace require(cond, "string") reverts below with named errors — same checks,
+    // same call sites, no behavior change.
+    error OwnerIsZero();
+    error NotOwner();
+    error AlreadyOwner();
+    error NotPendingOwner();
+    error ZeroAddress();
+    error TwapWindowTooShort();
+    error FreezeBelowGuard();
+
     /// @dev `owner` was immutable. That is stricter than it looks: it means a lost or
     ///      compromised deployer key can never be rotated, and this owner sets the
     ///      pool addresses the reference is read from. Mutable with a two-step
     ///      handover is the weaker-looking option that actually fails safe.
     constructor(address _owner) {
-        require(_owner != address(0), "owner is zero");
+        if (_owner == address(0)) revert OwnerIsZero();
         owner = _owner;
         emit OwnerTransferred(address(0), _owner);
     }
 
     modifier onlyOwner() {
-        require(msg.sender == owner, "not owner");
+        if (msg.sender != owner) revert NotOwner();
         _;
     }
 
     /// @notice Nominate the next owner. Nothing changes until they accept.
     function proposeOwner(address newOwner) external onlyOwner {
-        require(newOwner != owner, "already owner");
+        if (newOwner == owner) revert AlreadyOwner();
         pendingOwner = newOwner;
         emit OwnerProposed(owner, newOwner);
     }
 
     /// @notice Accept a pending nomination. Only the nominee can call it.
     function acceptOwner() external {
-        require(msg.sender == pendingOwner, "not pending owner");
+        if (msg.sender != pendingOwner) revert NotPendingOwner();
         address previous = owner;
         owner = pendingOwner;
         pendingOwner = address(0);
@@ -94,14 +104,13 @@ contract SplitV3Reference is IReferencePrice {
     // -------------------------------------------------------------------------
 
     function setConfig(PoolId id, Config calldata cfg) external onlyOwner {
-        require(cfg.fastPool != address(0) && cfg.deepPool != address(0), "zero addr");
-        require(cfg.twapWindow >= 60, "twap too short");
+        if (cfg.fastPool == address(0) || cfg.deepPool == address(0)) revert ZeroAddress();
+        if (cfg.twapWindow < 60) revert TwapWindowTooShort();
         // A backstop at or below the 1.00x tolerance would freeze before the curve ever
         // engages, restoring the cheap off-switch the curve exists to remove.
-        require(
-            cfg.freezeMaxDevTicks == 0 || cfg.freezeMaxDevTicks > cfg.guardMaxDevTicks,
-            "freeze <= guard"
-        );
+        if (!(cfg.freezeMaxDevTicks == 0 || cfg.freezeMaxDevTicks > cfg.guardMaxDevTicks)) {
+            revert FreezeBelowGuard();
+        }
         configs[id] = cfg;
         emit ConfigSet(id, cfg);
     }

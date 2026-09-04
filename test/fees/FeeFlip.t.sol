@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {BackdraftTestBase} from "../BackdraftTestBase.sol";
+import {BackdraftHook}     from "../../src/BackdraftHook.sol";
 import {LPFeeLibrary}      from "v4-core/libraries/LPFeeLibrary.sol";
 import {StateLibrary}      from "v4-core/libraries/StateLibrary.sol";
 
@@ -211,13 +212,13 @@ contract FeeFlipTest is BackdraftTestBase {
     ///         time rather than discovered as a surprising fee in production.
     function test_SetPoolCfgRejectsNarrowingFeeAboveBaseFee() public {
         narrowingFee = BASE_FEE + 1;
-        vm.expectRevert(bytes("narrowingFee > baseFee"));
+        vm.expectRevert(BackdraftHook.NarrowingFeeAboveBaseFee.selector);
         _setPoolCfg();
     }
 
     function test_SetPoolCfgRejectsBaseFeeAboveMax() public {
         baseFee = LPFeeLibrary.MAX_LP_FEE + 1;
-        vm.expectRevert(bytes("baseFee > max"));
+        vm.expectRevert(BackdraftHook.BaseFeeTooHigh.selector);
         _setPoolCfg();
     }
 

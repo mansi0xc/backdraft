@@ -86,7 +86,7 @@ contract ReviewRegressionsTest is BackdraftTestBase {
             "a swept gap must record its pots as fully paid");
 
         vm.prank(LP_A, LP_A);
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "swept"));
+        vm.expectRevert(BackdraftHook.AlreadySwept.selector);
         hook.claimLp(poolId, idx1, -6000, 6000, bytes32(0));
 
         uint256 g2Obligation = uint256(g2.escrowed) - g2.lpPaid - g2.traderPaid;
@@ -108,7 +108,7 @@ contract ReviewRegressionsTest is BackdraftTestBase {
         hook.sweepUnclaimed(poolId, idx);
 
         vm.prank(ROHAN, ROHAN);
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "swept"));
+        vm.expectRevert(BackdraftHook.AlreadySwept.selector);
         hook.claimTrader(poolId, idx);
     }
 
@@ -163,7 +163,7 @@ contract ReviewRegressionsTest is BackdraftTestBase {
         uint256 tp = uint256(g2.escrowed) * traderShareBps / 10_000;   // ledger explains fully
         // JIT cannot claim.
         vm.prank(JIT, JIT);
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "too new"));
+        vm.expectRevert(BackdraftHook.TooNew.selector);
         hook.claimLp(poolId, idx2, -6000, 6000, bytes32(uint256(1)));
 
         // LP_A's pot is escrow − traderPot + carry.
@@ -332,13 +332,13 @@ contract ReviewRegressionsTest is BackdraftTestBase {
 
     function test_R6_SetPoolCfgRejectsTraderShareAbove100Pct() public {
         traderShareBps = 10_001;
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "traderShare > 100%"));
+        vm.expectRevert(BackdraftHook.TraderShareTooHigh.selector);
         _setPoolCfg();
     }
 
     function test_R6_SetPoolCfgRejectsSurchargeCapAbove100Pct() public {
         surchargeCapBps = 10_001;
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "surchargeCap > 100%"));
+        vm.expectRevert(BackdraftHook.SurchargeCapTooHigh.selector);
         _setPoolCfg();
     }
 }

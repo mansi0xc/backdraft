@@ -142,7 +142,7 @@ contract EndToEndTest is BackdraftTestBase {
 
         // ── Step 9: LP_new claim reverts (too new) ───────────────────
         vm.prank(LP_NEW, LP_NEW);
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "too new"));
+        vm.expectRevert(BackdraftHook.TooNew.selector);
         hook.claimLp(poolId, gapIdx, int24(-6000), int24(6000), bytes32(0));
 
         // ── Step 10: Conservation check ──────────────────────────────
@@ -243,7 +243,7 @@ contract EndToEndTest is BackdraftTestBase {
         uint256 gapIdx = hook.openGapIdx(poolId);
         assertGt(gapIdx, 0, "precondition: gap must be open");
 
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "still open"));
+        vm.expectRevert(BackdraftHook.GapStillOpen.selector);
         hook.settle(poolId, gapIdx);
     }
 
@@ -286,7 +286,7 @@ contract EndToEndTest is BackdraftTestBase {
         if (!hook.gapAt(poolId, latestIdx).settled) hook.settle(poolId, latestIdx);
         assertTrue(hook.gapAt(poolId, latestIdx).settled);
 
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "already settled"));
+        vm.expectRevert(BackdraftHook.AlreadySettled.selector);
         hook.settle(poolId, latestIdx);
     }
 }

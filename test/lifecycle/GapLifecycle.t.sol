@@ -211,7 +211,7 @@ contract GapLifecycleTest is BackdraftTestBase {
         uint256 idx = hook.openGapIdx(poolId);
         _swap(VIK, true, -2_000_000e18);
 
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "already settled"));
+        vm.expectRevert(BackdraftHook.AlreadySettled.selector);
         hook.settle(poolId, idx);
     }
 

@@ -76,7 +76,7 @@ contract ClaimAuthTest is BackdraftTestBase {
         // THIEF supplies LP's exact tick range and salt. The key is now derived
         // from msg.sender, so this resolves to THIEF's own (empty) position.
         vm.prank(THIEF, THIEF);
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "no position"));
+        vm.expectRevert(BackdraftHook.NoPosition.selector);
         hook.claimLp(poolId, gapIdx, LO, HI, bytes32(0));
 
         assertEq(token0.balanceOf(THIEF), t0, "thief must not gain currency0");
@@ -90,7 +90,7 @@ contract ClaimAuthTest is BackdraftTestBase {
         uint256 gapIdx = _settledGapWithLpPot();
 
         vm.prank(THIEF, THIEF);
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "no position"));
+        vm.expectRevert(BackdraftHook.NoPosition.selector);
         hook.claimLp(poolId, gapIdx, LO, HI, bytes32(0));
 
         uint256 before0 = token0.balanceOf(LP);
@@ -111,7 +111,7 @@ contract ClaimAuthTest is BackdraftTestBase {
         hook.claimLp(poolId, gapIdx, LO, HI, bytes32(0));
 
         vm.prank(LP, LP);
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "claimed"));
+        vm.expectRevert(BackdraftHook.AlreadyClaimed.selector);
         hook.claimLp(poolId, gapIdx, LO, HI, bytes32(0));
     }
 
@@ -120,7 +120,7 @@ contract ClaimAuthTest is BackdraftTestBase {
         uint256 gapIdx = _settledGapWithLpPot();
 
         vm.prank(LP, LP);
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "no position"));
+        vm.expectRevert(BackdraftHook.NoPosition.selector);
         hook.claimLp(poolId, gapIdx, int24(-1200), int24(1200), bytes32(0));
     }
 
@@ -129,7 +129,7 @@ contract ClaimAuthTest is BackdraftTestBase {
         uint256 gapIdx = _settledGapWithLpPot();
 
         vm.prank(LP, LP);
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "no position"));
+        vm.expectRevert(BackdraftHook.NoPosition.selector);
         hook.claimLp(poolId, gapIdx, LO, HI, bytes32(uint256(1)));
     }
 
@@ -151,7 +151,7 @@ contract ClaimAuthTest is BackdraftTestBase {
             "precondition: ledger must be non-empty");
 
         vm.prank(THIEF, THIEF);
-        vm.expectRevert(abi.encodeWithSignature("Error(string)", "nothing"));
+        vm.expectRevert(BackdraftHook.NothingToClaim.selector);
         hook.claimTrader(poolId, gapIdx);
     }
 

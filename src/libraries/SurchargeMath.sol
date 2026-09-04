@@ -4,6 +4,8 @@ pragma solidity ^0.8.26;
 import {FullMath} from "v4-core/libraries/FullMath.sol";
 
 library SurchargeMath {
+    error SurchargeOverflow();
+
     /// @notice Surcharge = notional × gapTicks × rateBps, capped at notional × capBps.
     /// @param notional   Absolute swap amount, in the currency the surcharge is taken in
     /// @param gapTicks   |poolTick − refTick| the swap is priced against (maxAbsGap)
@@ -54,7 +56,7 @@ library SurchargeMath {
 
         // Cannot exceed the notional itself unless capBps is misconfigured above 100%;
         // the cast is checked rather than silently truncating a bad config.
-        require(surcharge <= type(uint128).max, "surcharge overflow");
+        if (surcharge > type(uint128).max) revert SurchargeOverflow();
         return uint128(surcharge);
     }
 }

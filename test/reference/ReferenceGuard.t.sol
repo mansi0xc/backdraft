@@ -268,7 +268,7 @@ contract ReferenceGuardTest is Test {
     /// @notice A backstop at or below the 1.00x tolerance would freeze before the curve
     ///         engages, restoring the cheap off-switch. Rejected at config time.
     function test_SetConfigRejectsBackstopBelowGuard() public {
-        vm.expectRevert(bytes("freeze <= guard"));
+        vm.expectRevert(SplitV3Reference.FreezeBelowGuard.selector);
         ref.setConfig(ID, SplitV3Reference.Config({
             fastPool:          address(fast),
             deepPool:          address(deep),
