@@ -24,6 +24,24 @@ import {IUniswapV3PoolMinimal} from "../interfaces/IUniswapV3PoolMinimal.sol";
 ///   2. observe() unavailable (insufficient observation cardinality)
 ///   3. divTicks > freezeMaxDevTicks, when that backstop is enabled — see below
 ///
+/// TRUNCATION (appendix §7). Optionally, the reference the hook SEES may move at most
+/// `maxTicksPerBlock` ticks per block from the last committed value. This is the fix for
+/// the two attacks the guard cannot close: a push moves the hook's view by at most B per
+/// block however much the attacker spends, so masking a gap stops being a one-shot trade
+/// and becomes a sustained cost, and a single-block reference glitch enters the hook's
+/// view as at most B ticks instead of in full.
+///
+/// It is DISABLED by default (`maxTicksPerBlock == 0` is raw, byte-identical to the
+/// untruncated path) because the evidence does not yet support switching it on: real
+/// capture rests on n = 2 independent episodes, and the phantom cost it introduces is
+/// non-monotone in B and regime-dependent. Enable per pool with setMaxTicksPerBlock once
+/// B has been derived for the flow regime in question.
+///
+/// divTicks is deliberately computed on the RAW reads and passed through untouched. If
+/// divergence were measured from the clamped value, a push would be hidden from the very
+/// signal that prices it — truncation would silently disable the graduated multiplier and
+/// hand the attacker the clamp AND the 1.00x rate.
+///
 /// See the README (Reference price, Measurement) for the rationale and the measured
 /// error, and APPENDIX.md for the manipulation-cost analysis.
 contract SplitV3Reference is IReferencePrice {
@@ -43,12 +61,27 @@ contract SplitV3Reference is IReferencePrice {
                                   // where the reference is not merely pushed but
                                   // nonsensical, and accept that reaching it costs the
                                   // attacker roughly that multiple of the $21 baseline.
-                                  // Truncated-oracle reference smoothing is the real fix
-                                  // and is documented, not implemented.
+                                  // Truncated-oracle reference smoothing is the real fix;
+                                  // it is implemented below and disabled by default.
         bool    invertTicks;      // true when v3 token0/token1 order differs from v4
     }
 
+    /// @notice Last committed reference for a pool. `seeded` distinguishes "never read"
+    ///         from "read, and the tick happened to be 0".
+    struct Anchor {
+        int24  tick;
+        uint48 blockNum;
+        bool   seeded;
+    }
+
     mapping(PoolId => Config) public configs;
+
+    /// @notice Per-block movement bound in ticks. 0 = raw, no truncation. Default.
+    mapping(PoolId => uint16) public maxTicksPerBlock;
+
+    /// @notice Anchor the bound is measured from. Advanced by updateRefTick only.
+    mapping(PoolId => Anchor) public anchors;
+
     address public owner;
 
     /// @notice Proposed next owner. Set by proposeOwner, cleared by acceptOwner.
@@ -57,6 +90,8 @@ contract SplitV3Reference is IReferencePrice {
     event OwnerProposed(address indexed currentOwner, address indexed proposedOwner);
     event OwnerTransferred(address indexed previousOwner, address indexed newOwner);
     event ConfigSet(PoolId indexed id, Config cfg);
+    event TruncationBoundSet(PoolId indexed id, uint16 ticksPerBlock);
+    event AnchorMoved(PoolId indexed id, int24 rawTick, int24 seenTick, bool clamped);
 
     // Replace require(cond, "string") reverts below with named errors — same checks,
     // same call sites, no behavior change.
@@ -115,14 +150,96 @@ contract SplitV3Reference is IReferencePrice {
         emit ConfigSet(id, cfg);
     }
 
+    /// @notice Set the per-block movement bound. 0 disables truncation.
+    /// @dev    B is the p99 of honest per-block reference movement for the flow regime,
+    ///         derived off-chain: 10-16 ticks across the three measured windows, none of
+    ///         which is a calm market. There is deliberately no adaptive on-chain bound.
+    ///         A bound that widens with observed volatility is a bound an attacker widens
+    ///         by manufacturing volatility, which would reintroduce the class of attack
+    ///         truncation exists to close.
+    function setMaxTicksPerBlock(PoolId id, uint16 b) external onlyOwner {
+        maxTicksPerBlock[id] = b;
+        emit TruncationBoundSet(id, b);
+    }
+
     // -------------------------------------------------------------------------
     // IReferencePrice
     // -------------------------------------------------------------------------
 
+    /// @notice Read the reference without committing the truncation anchor. Returns
+    ///         exactly what updateRefTick would return at this block, minus the write.
     function getRefTick(PoolId id)
         external
         view
         override
+        returns (int24 refTick, bool ok, uint24 divTicks)
+    {
+        int24 raw;
+        (raw, ok, divTicks) = _rawRead(id);
+        if (!ok) return (0, false, divTicks);
+        (refTick, ) = _truncate(id, raw);
+    }
+
+    /// @notice Read the reference and advance the truncation anchor. Called once per swap
+    ///         from beforeSwap; afterSwap reuses the value from the transient swap cache,
+    ///         so the anchor moves at most once per swap.
+    /// @dev    A frozen read commits NOTHING. The anchor stays where the last trusted read
+    ///         left it, and the blocks that elapse while frozen still count toward the
+    ///         allowance on the next trusted read — so a freeze cannot manufacture a lag
+    ///         that compounds with the bound.
+    function updateRefTick(PoolId id)
+        external
+        override
+        returns (int24 refTick, bool ok, uint24 divTicks)
+    {
+        int24 raw;
+        (raw, ok, divTicks) = _rawRead(id);
+        if (!ok) return (0, false, divTicks);
+
+        bool clamped;
+        (refTick, clamped) = _truncate(id, raw);
+
+        anchors[id] = Anchor({tick: refTick, blockNum: uint48(block.number), seeded: true});
+        emit AnchorMoved(id, raw, refTick, clamped);
+    }
+
+    /// @dev Clamp `raw` to within maxTicksPerBlock * blocksElapsed of the anchor.
+    ///      Never overshoots: a raw value inside the allowance is returned unchanged, so
+    ///      the truncated reference approaches raw from one side and stops there.
+    function _truncate(PoolId id, int24 raw) internal view returns (int24 seen, bool clamped) {
+        uint16 b = maxTicksPerBlock[id];
+        Anchor storage a = anchors[id];
+
+        // Raw mode, or the first ever read: no anchor to bound against.
+        if (b == 0 || !a.seeded) return (raw, false);
+
+        uint256 elapsed = block.number - uint256(a.blockNum);
+
+        // Same block as the last commit: zero allowance. This is the line that makes a
+        // same-block push-and-revert on the fast pool invisible to the hook.
+        if (elapsed == 0) return (a.tick, a.tick != raw);
+
+        // int24 spans +/-8.4M ticks. Cap the allowance so the multiply cannot overflow
+        // int256 on a pool that has not been read in a very long time; past the full tick
+        // range the bound is not binding on any real price anyway.
+        uint256 allowance = elapsed * uint256(b);
+        if (allowance > uint256(int256(type(int24).max))) return (raw, false);
+
+        int256 lo = int256(a.tick) - int256(allowance);
+        int256 hi = int256(a.tick) + int256(allowance);
+        int256 r = int256(raw);
+
+        if (r < lo) return (int24(lo), true);
+        if (r > hi) return (int24(hi), true);
+        return (raw, false);
+    }
+
+    /// @dev The untruncated read: two spot ticks, the deep TWAP, divergence, and the
+    ///      freeze conditions. divTicks is computed HERE, on raw values, and is never
+    ///      derived from the truncated reference.
+    function _rawRead(PoolId id)
+        internal
+        view
         returns (int24 refTick, bool ok, uint24 divTicks)
     {
         Config storage c = configs[id];

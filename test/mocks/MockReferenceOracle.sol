@@ -25,12 +25,24 @@ contract MockReferenceOracle is IReferencePrice {
     }
 
     function getRefTick(PoolId id)
-        external
+        public
         view
         override
         returns (int24 refTick, bool ok, uint24 divTicks)
     {
         if (frozen[id]) return (0, false, divergence[id]);
         return (refTicks[id], true, divergence[id]);
+    }
+
+    /// @dev The mock keeps no per-read state, so committing is a no-op. Hook tests
+    ///      exercise gap mechanics, not reference behaviour; truncation is covered
+    ///      against the real oracle in test/reference/ReferenceTruncation.t.sol.
+    function updateRefTick(PoolId id)
+        external
+        view
+        override
+        returns (int24, bool, uint24)
+    {
+        return getRefTick(id);
     }
 }

@@ -545,7 +545,10 @@ contract BackdraftHook is IHooks, IUnlockCallback {
         PoolId id = key.toId();
         PoolCfg storage c = cfg[id];
 
-        (int24 refTick, bool ok, uint24 divTicks) = referenceOracle.getRefTick(id);
+        // updateRefTick, not getRefTick: this is the pricing read, and it advances the
+        // reference oracle's truncation anchor. Exactly one commit per swap — afterSwap
+        // reuses refTick from the transient swap cache rather than reading again.
+        (int24 refTick, bool ok, uint24 divTicks) = referenceOracle.updateRefTick(id);
         if (!ok) {
             // Invalidate the cache: afterSwap must not attribute this swap using
             // direction data from a previous one.

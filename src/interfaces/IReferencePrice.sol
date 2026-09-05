@@ -21,8 +21,18 @@ interface IReferencePrice {
     ///      route (tightening it makes the freeze cheaper; loosening it widens the mask).
     ///      Reporting the divergence instead lets the caller make manipulation
     ///      progressively expensive rather than progressively effective.
+    /// @notice Read the reference without committing implementation state.
     function getRefTick(PoolId id)
         external
         view
+        returns (int24 refTick, bool ok, uint24 divTicks);
+
+    /// @notice Read the reference and commit any per-read state the implementation keeps
+    ///         (the truncation anchor, in SplitV3Reference). Callers that price a swap
+    ///         must use this; callers that only observe should use getRefTick.
+    /// @dev    Returns the same triple as getRefTick at the same block. Implementations
+    ///         without per-read state may simply forward to it.
+    function updateRefTick(PoolId id)
+        external
         returns (int24 refTick, bool ok, uint24 divTicks);
 }

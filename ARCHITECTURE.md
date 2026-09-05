@@ -60,6 +60,7 @@ flowchart TB
         BS["beforeSwap<br/>detect · price · escrow"]
         AS["afterSwap<br/>attribute · close"]
         LIQ["beforeAddLiquidity<br/>beforeRemoveLiquidity<br/><i>position age + checkpoints</i>"]
+        TC["swap cache<br/><i>one transient slot per pool<br/>tstore / tload</i>"]
         CLAIM["settle · claimTrader<br/>claimLp · sweepUnclaimed"]
     end
 
@@ -67,6 +68,7 @@ flowchart TB
         GM["GapMath<br/>direction, abs"]
         SM["SurchargeMath<br/>notional × min(rate×gap, cap)"]
         DM["DivergenceMath<br/>divTicks → multiplier"]
+        FF["FeeFlipMath<br/>discount, bounded by<br/>the surcharge on the same swap"]
         EL["EligibilityLib<br/>age + range filter"]
     end
 
@@ -81,10 +83,13 @@ flowchart TB
     BS --> GM
     BS --> SM
     BS --> DM
+    BS --> FF
     AS --> GM
+    BS -->|"writes"| TC
+    TC -->|"reads"| AS
     CLAIM --> EL
     BS -->|"mint 6909 · BeforeSwapDelta"| PM
-    CLAIM -->|"burn · take · donate"| PM
+    CLAIM -->|"burn · take"| PM
 ```
 
 ---
@@ -185,7 +190,7 @@ flowchart LR
     SETTLED["<b>SETTLED</b><br/>pots fixed<br/>escrow claimable"]
     SETTLED --> TP["claimTrader<br/><i>pro-rata by contribution</i>"]
     SETTLED --> LP["claimLp<br/><i>eligible positions only</i>"]
-    SETTLED -->|"after sweepGraceBlocks"| SW["sweepUnclaimed<br/><i>donates the remainder</i>"]
+    SETTLED -->|"after sweepGraceBlocks"| SW["sweepUnclaimed<br/><i>carries the remainder forward<br/>to the next gap in that currency</i>"]
 ```
 
 ---
@@ -303,7 +308,7 @@ flowchart TD
     ATT --> F["<b>Freezing</b><br/>push past the tolerance so<br/>the hook refuses to act"]
 
     M --> M2["no gap opens<br/>→ nothing is charged<br/>→ <b>the multiplier has<br/>nothing to multiply</b>"]
-    M2 --> M3["break-even:<br/><b>$22k–$54k</b> arb notional<br/><i>inside ordinary trade size</i>"]
+    M2 --> M3["break-even:<br/><b>$18k–$40k</b> arb notional<br/><i>inside ordinary trade size</i>"]
 
     F --> F2["under the OLD boolean guard:<br/>~$21 to silence the hook entirely"]
     F2 --> F3["fixed by pricing divergence<br/>instead of freezing on it"]
